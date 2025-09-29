@@ -59,6 +59,7 @@ type RegistryCmd struct {
 	MirrorResolveRetries         int           `arg:"--mirror-resolve-retries,env:MIRROR_RESOLVE_RETRIES" default:"3" help:"Max amount of mirrors to attempt."`
 	ResolveLatestTag             bool          `arg:"--resolve-latest-tag,env:RESOLVE_LATEST_TAG" default:"true" help:"When true latest tags will be resolved to digests."`
 	DebugWebEnabled              bool          `arg:"--debug-web-enabled,env:DEBUG_WEB_ENABLED" default:"false" help:"When true enables debug web page."`
+	Broadcast                    bool          `arg:"--broadcast,env:BROADCAST" default:"false" help:"Broadcast content advertisements across the cluster."`
 	registry.PushConfig
 }
 
@@ -171,7 +172,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 
 	// State tracking
 	g.Go(func() error {
-		err := state.Track(ctx, ociStore, router, args.ResolveLatestTag)
+		err := state.Track(ctx, ociStore, router, args.ResolveLatestTag, args.Broadcast)
 		if err != nil {
 			return err
 		}
