@@ -13,12 +13,14 @@ import (
 )
 
 var (
-	nameRegex           = regexp.MustCompile(`([a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*)`)
-	tagRegex            = regexp.MustCompile(`([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})`)
-	manifestRegexTag    = regexp.MustCompile(`/v2/` + nameRegex.String() + `/manifests/` + tagRegex.String() + `$`)
-	manifestRegexDigest = regexp.MustCompile(`/v2/` + nameRegex.String() + `/manifests/(.*)`)
-	blobsRegexDigest    = regexp.MustCompile(`/v2/` + nameRegex.String() + `/blobs/(.*)`)
-	blobsUploadsRegex   = regexp.MustCompile(`/v2/` + nameRegex.String() + `/blobs/uploads/(.*)`)
+	repoRegexStr        = `([a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*)`
+	tagRegexStr         = `([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})`
+	repoRegex           = regexp.MustCompile(`^` + repoRegexStr + `$`)
+	tagRegex            = regexp.MustCompile(`^` + tagRegexStr + `$`)
+	manifestRegexTag    = regexp.MustCompile(`/v2/` + repoRegexStr + `/manifests/` + tagRegexStr + `$`)
+	manifestRegexDigest = regexp.MustCompile(`/v2/` + repoRegexStr + `/manifests/(.*)`)
+	blobsRegexDigest    = regexp.MustCompile(`/v2/` + repoRegexStr + `/blobs/(.*)`)
+	blobsUploadsRegex   = regexp.MustCompile(`/v2/` + repoRegexStr + `/blobs/uploads/(.*)`)
 )
 
 // DistributionKind represents the kind of content.
@@ -73,21 +75,21 @@ func (d DistributionPath) URL() *url.URL {
 func ParseDistributionPath(u *url.URL) (DistributionPath, error) {
 	registry := u.Query().Get("ns")
 	comps := manifestRegexTag.FindStringSubmatch(u.Path)
-	if len(comps) == 6 {
+	if len(comps) == 3 {
 		if registry == "" {
 			return DistributionPath{}, errors.New("registry parameter needs to be set for tag references")
 		}
 		dist := DistributionPath{
 			Kind:     DistributionKindManifest,
 			Name:     comps[1],
-			Tag:      comps[5],
+			Tag:      comps[2],
 			Registry: registry,
 		}
 		return dist, nil
 	}
 	comps = manifestRegexDigest.FindStringSubmatch(u.Path)
-	if len(comps) == 6 {
-		dgst, err := digest.Parse(comps[5])
+	if len(comps) == 3 {
+		dgst, err := digest.Parse(comps[2])
 		if err != nil {
 			return DistributionPath{}, err
 		}
@@ -100,20 +102,20 @@ func ParseDistributionPath(u *url.URL) (DistributionPath, error) {
 		return dist, nil
 	}
 	comps = blobsUploadsRegex.FindStringSubmatch(u.Path)
-	if len(comps) == 6 {
+	if len(comps) == 3 {
 		dgst := digest.Digest(u.Query().Get("digest"))
 		dist := DistributionPath{
 			Kind:     DistributionKindUpload,
 			Name:     comps[1],
 			Digest:   dgst,
 			Registry: registry,
-			Session:  comps[5],
+			Session:  comps[2],
 		}
 		return dist, nil
 	}
 	comps = blobsRegexDigest.FindStringSubmatch(u.Path)
-	if len(comps) == 6 {
-		dgst, err := digest.Parse(comps[5])
+	if len(comps) == 3 {
+		dgst, err := digest.Parse(comps[2])
 		if err != nil {
 			return DistributionPath{}, err
 		}
