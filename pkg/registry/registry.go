@@ -111,6 +111,7 @@ type Registry struct {
 	resolveTimeout   time.Duration
 	resolveLatestTag bool
 	push             PushConfig
+	addr             string
 }
 
 func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOption) (*Registry, error) {
@@ -181,6 +182,7 @@ func (r *Registry) Server(addr string) (*http.Server, error) {
 		Addr:    addr,
 		Handler: r.Handler(),
 	}
+	r.addr = addr
 	return srv, nil
 }
 

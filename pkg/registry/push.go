@@ -367,6 +367,19 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			log.Info("Starting upstream image push")
 			ctx := context.Background()
 
+			rOpts := docker.ResolverOptions{Hosts: r.localRegistryHosts, Headers: pushHeaders}
+			fetcher, err := docker.NewResolver(rOpts).Fetcher(ctx, ref)
+			if err != nil {
+				log.Error(err, "failed to get fetcher")
+				return
+			}
+
+			err = images.Dispatch(ctx, images.Handlers(images.ChildrenHandler(cs), remotes.FetchHandler(cs, fetcher)), nil, desc)
+			if err != nil {
+				log.Error(err, "failed to fetch image layers")
+				return
+			}
+
 			pusher, err := docker.NewResolver(docker.ResolverOptions{Headers: pushHeaders}).Pusher(ctx, ref)
 			if err != nil {
 				log.Error(err, "failed to get pusher")
@@ -380,4 +393,13 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			log.Info("Finished upstream image push")
 		}()
 	}
+}
+
+func (r *Registry) localRegistryHosts(_ string) ([]docker.RegistryHost, error) {
+	return []docker.RegistryHost{{
+		Host:         r.addr,
+		Scheme:       "http",
+		Path:         "/v2",
+		Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve,
+	}}, nil
 }
