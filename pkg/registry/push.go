@@ -373,6 +373,12 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 				log.Error(err, "failed to get fetcher")
 				return
 			}
+			err = images.Dispatch(ctx, images.Handlers(remotes.FetchHandler(cs, fetcher), images.ChildrenHandler(cs)), nil, desc)
+			if err != nil {
+				log.Error(err, "failed to fetch image layers")
+				return
+			}
+
 			err = remotes.Fetch(ctx, cs, fetcher, desc)
 			if err != nil {
 				log.Error(err, "failed to fetch image layers")
