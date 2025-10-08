@@ -374,25 +374,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 				return
 			}
 
-			err = images.Dispatch(ctx, images.Handlers(
-				images.ChildrenHandler(cs),
-				images.HandlerFunc(func(ctx context.Context, d ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-					if d.Digest == desc.Digest {
-						return nil, nil
-					}
-					_, err := remotes.FetchHandler(cs, fetcher)(ctx, d)
-					if errdefs.IsAlreadyExists(err) {
-						return nil, nil
-					}
-					return nil, err
-				}),
-			), nil, desc)
-			if err != nil {
-				log.Error(err, "failed to fetch image layers")
-				return
-			}
-
-			err = remotes.Fetch(ctx, cs, fetcher, desc)
+			err = images.Dispatch(ctx, images.Handlers(images.ChildrenHandler(cs), remotes.FetchHandler(cs, fetcher)), nil, desc)
 			if err != nil {
 				log.Error(err, "failed to fetch image layers")
 				return
