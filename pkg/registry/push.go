@@ -319,7 +319,14 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	if dist.Digest != "" {
 		ref = fmt.Sprintf("%s/%s@%s", dist.Registry, dist.Name, desc.Digest)
 	}
-	if _, err = client.ImageService().Create(ctx, (images.Image{Name: ref, Target: desc})); err != nil && !errdefs.IsAlreadyExists(err) {
+	image := images.Image{Name: ref, Target: desc}
+
+	imageService := client.ImageService()
+	_, err = imageService.Create(ctx, image)
+	if err != nil && errdefs.IsAlreadyExists(err) {
+		_, err = imageService.Update(ctx, image)
+	}
+	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
