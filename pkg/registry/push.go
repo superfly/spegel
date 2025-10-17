@@ -389,7 +389,7 @@ func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.
 	}
 }
 
-// Simple exponential backoff with 1^n second delay between attempts.
+// Simple exponential backoff with 2^n second delay between attempts.
 func retryWithBackoff(attempts int, fn func() error, log logr.Logger) error {
 	var err error
 	for i := 0; i < attempts; i++ {
