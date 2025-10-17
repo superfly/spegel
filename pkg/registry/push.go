@@ -18,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/errdefs"
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -31,6 +32,8 @@ type PushConfig struct {
 	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true asynchronously pushes uploaded images to the upstream registry."`
 	UpstreamHeaders map[string]string `arg:"--push-upstream-headers,env:PUSH_UPSTREAM_HEADERS" help:"HTTP header overrides for upstream push request."`
 	LeaseDuration   time.Duration     `arg:"--push-lease-duration,env:PUSH_LEASE_DURATION" default:"10m" help:"Temporary lease duration for pushed images."`
+	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"10" help:"Number of retries for upstream push requests."`
+	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"5m" help:"Upstream push request timeout."`
 }
 
 // Add a temporary lease to newly created content and images.
@@ -345,37 +348,59 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		for k, v := range r.push.UpstreamHeaders {
 			pushHeaders.Set(k, v)
 		}
-		go func() {
-			log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
-			log.Info("Starting upstream image push")
-			ctx := context.Background()
-
-			rOpts := docker.ResolverOptions{Hosts: r.registryHosts, Headers: pushHeaders}
-			fetcher, err := docker.NewResolver(rOpts).Fetcher(ctx, ref)
-			if err != nil {
-				log.Error(err, "failed to get fetcher")
-				return
-			}
-
-			err = images.Dispatch(ctx, images.Handlers(images.ChildrenHandler(cs), remotes.FetchHandler(cs, fetcher)), nil, desc)
-			if err != nil {
-				log.Error(err, "failed to fetch image layers")
-				return
-			}
-
-			pusher, err := docker.NewResolver(docker.ResolverOptions{Headers: pushHeaders}).Pusher(ctx, ref)
-			if err != nil {
-				log.Error(err, "failed to get pusher")
-				return
-			}
-
-			if err = remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
-				log.Error(err, "failed to push image upstream")
-				return
-			}
-			log.Info("Finished upstream image push")
-		}()
+		go r.pushUpstream(ref, desc, cs, pushHeaders)
 	}
+}
+
+func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) {
+	log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
+	log.Info("Starting upstream image push")
+	ctx := context.Background()
+
+	err := retryWithBackoff(r.push.UpstreamRetries, func() error {
+		ctx, cancel := context.WithTimeout(ctx, r.push.UpstreamTimeout)
+		defer cancel()
+
+		rOpts := docker.ResolverOptions{Hosts: r.registryHosts, Headers: pushHeaders}
+		fetcher, err := docker.NewResolver(rOpts).Fetcher(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("failed to get fetcher: %w", err)
+		}
+		err = images.Dispatch(ctx, images.Handlers(images.ChildrenHandler(cs), remotes.FetchHandler(cs, fetcher)), nil, desc)
+		if err != nil {
+			return fmt.Errorf("failed to fetch image layers: %w", err)
+		}
+
+		pusher, err := docker.NewResolver(docker.ResolverOptions{Headers: pushHeaders}).Pusher(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("failed to get pusher: %w", err)
+		}
+		if err = remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
+			return fmt.Errorf("failed to push image upstream: %w", err)
+		}
+
+		return nil
+	}, log)
+
+	if err != nil {
+		log.Error(err, "Failed to push upstream image")
+	} else {
+		log.Info("Finished upstream image push")
+	}
+}
+
+// Simple exponential backoff with 1^n second delay between attempts.
+func retryWithBackoff(attempts int, fn func() error, log logr.Logger) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = fn(); err == nil {
+			return nil
+		} else if i < attempts-1 {
+			log.Error(err, "attempt failed", "attempt", i+1)
+			time.Sleep(time.Duration(1<<uint(i)) * time.Second)
+		}
+	}
+	return fmt.Errorf("failed after %d attempts: %w", attempts, err)
 }
 
 // Broadcast content for immediate discovery.
