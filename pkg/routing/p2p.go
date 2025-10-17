@@ -146,6 +146,7 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 		dht.DisableValues(),
 		dht.MaxRecordAge(KeyTTL),
 		dht.BootstrapPeersFunc(bootstrapFunc(ctx, bs, host)),
+		dht.EnableOptimisticProvide(),
 	}
 	kdht, err := dht.New(ctx, host, dhtOpts...)
 	if err != nil {
