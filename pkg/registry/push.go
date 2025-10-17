@@ -179,6 +179,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	r.advertise(dist.Digest)
 
 	created(rw, dist)
 }
@@ -255,6 +256,7 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	r.advertise(dist.Digest)
 
 	dist.Kind = oci.DistributionKindBlob
 	created(rw, dist)
@@ -338,32 +340,6 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		r.log.Error(err, "failed to set image labels")
 		return
 	}
-	go func() {
-		// Broadcast image content for immediate discovery.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		img, err := oci.NewImage(dist.Registry, dist.Name, dist.Tag, desc.Digest)
-		if err != nil {
-			r.log.Error(err, "failed to announce image")
-			return
-		}
-		keys := []string{desc.Digest.String(), ref}
-		digests, err := oci.WalkImage(ctx, r.ociStore, img)
-		if err == nil {
-			for _, dgst := range digests {
-				keys = append(keys, dgst.String())
-			}
-		} else {
-			r.log.Error(err, "failed to walk image")
-		}
-
-		err = r.router.Advertise(ctx, keys, true)
-		if err != nil {
-			r.log.Error(err, "failed to advertise image")
-		} else {
-			r.log.Info("advertised image")
-		}
-	}()
 	if r.push.Upstream {
 		pushHeaders := req.Header.Clone()
 		for k, v := range r.push.UpstreamHeaders {
@@ -399,6 +375,16 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			}
 			log.Info("Finished upstream image push")
 		}()
+	}
+}
+
+// Broadcast content for immediate discovery.
+func (r *Registry) advertise(dgst digest.Digest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := r.router.Advertise(ctx, []string{dgst.String()}, true)
+	if err != nil {
+		r.log.Error(err, "failed to advertise content")
 	}
 }
 
