@@ -207,8 +207,12 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 	}
 
 	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)))
-	if err != nil {
+	if errdefs.IsNotFound(err) {
 		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
+		return
+	}
+	if err != nil {
+		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 	if _, err = io.Copy(w, req.Body); err != nil {
@@ -238,8 +242,18 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 	}
 	desc := ocispec.Descriptor{Digest: dist.Digest}
 	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
-	if err != nil {
+	if errdefs.IsAlreadyExists(err) {
+		// Another concurrent upload may have already provided this content digest.
+		dist.Kind = oci.DistributionKindBlob
+		created(rw, dist)
+		return
+	}
+	if errdefs.IsNotFound(err) {
 		rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeBlobUploadUnknown, "unknown upload session", nil))
+		return
+	}
+	if err != nil {
+		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 	defer w.Close()
@@ -289,7 +303,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	if mediaType == "" {
 		mediaType, err = oci.DetermineMediaType(body)
 		if err != nil {
-			rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeManifestInvalid, "cannot determine manifest media type", nil))
+			rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeManifestInvalid, "cannot determine manifest media type", err.Error()))
 			return
 		}
 	}
