@@ -18,7 +18,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
-	"k8s.io/klog/v2"
 
 	"github.com/spegel-org/spegel/internal/cleanup"
 	"github.com/spegel-org/spegel/internal/web"
@@ -61,6 +60,8 @@ type RegistryCmd struct {
 	ResolveLatestTag             bool          `arg:"--resolve-latest-tag,env:RESOLVE_LATEST_TAG" default:"true" help:"When true latest tags will be resolved to digests."`
 	DisableLatestTagCache        bool          `arg:"--disable-latest-tag-cache,env:DISABLE_LATEST_TAG_CACHE" default:"false" help:"When true the latest tag will not be served from local cache."`
 	DebugWebEnabled              bool          `arg:"--debug-web-enabled,env:DEBUG_WEB_ENABLED" default:"false" help:"When true enables debug web page."`
+	Broadcast                    bool          `arg:"--broadcast,env:BROADCAST" default:"false" help:"Broadcast content advertisements across the cluster."`
+	registry.PushConfig
 }
 
 type CleanupCmd struct {
@@ -92,7 +93,6 @@ func main() {
 	}
 	handler := slog.NewJSONHandler(os.Stderr, &opts)
 	log := logr.FromSlogHandler(handler)
-	klog.SetLogger(log)
 	ctx := logr.NewContext(context.Background(), log)
 
 	err := run(ctx, args)
@@ -173,7 +173,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 
 	// State tracking
 	g.Go(func() error {
-		err := state.Track(ctx, ociStore, router, args.ResolveLatestTag)
+		err := state.Track(ctx, ociStore, router, args.ResolveLatestTag, args.Broadcast)
 		if err != nil {
 			return err
 		}
@@ -188,6 +188,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 		registry.WithDisableLatestTagCache(args.DisableLatestTagCache),
 		registry.WithLogger(log),
 		registry.WithBasicAuth(username, password),
+		registry.WithPushConfig(args.PushConfig),
 	}
 	reg, err := registry.NewRegistry(ociStore, router, registryOpts...)
 	if err != nil {

@@ -13,7 +13,7 @@ import (
 	"github.com/spegel-org/spegel/pkg/routing"
 )
 
-func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatestTag bool) error {
+func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatestTag bool, brdcst bool) error {
 	log := logr.FromContextOrDiscard(ctx)
 	eventCh, err := ociStore.Subscribe(ctx)
 	if err != nil {
@@ -41,7 +41,7 @@ func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resol
 				return errors.New("event channel closed")
 			}
 			log.Info("OCI event", "key", event.Key, "type", event.Type)
-			err := handle(ctx, router, event)
+			err := handle(ctx, router, event, brdcst)
 			if err != nil {
 				log.Error(err, "could not handle event")
 				continue
@@ -70,7 +70,7 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 		if !ok {
 			continue
 		}
-		err := router.Advertise(ctx, []string{tagName})
+		err := router.Advertise(ctx, []string{tagName}, false)
 		if err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 		return err
 	}
 	for _, content := range contents {
-		err := router.Advertise(ctx, []string{content.Digest.String()})
+		err := router.Advertise(ctx, []string{content.Digest.String()}, false)
 		if err != nil {
 			return err
 		}
@@ -107,11 +107,11 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 	return nil
 }
 
-func handle(ctx context.Context, router routing.Router, event oci.OCIEvent) error {
+func handle(ctx context.Context, router routing.Router, event oci.OCIEvent, brdcst bool) error {
 	if event.Type != oci.CreateEvent {
 		return nil
 	}
-	err := router.Advertise(ctx, []string{event.Key})
+	err := router.Advertise(ctx, []string{event.Key}, brdcst)
 	if err != nil {
 		return err
 	}

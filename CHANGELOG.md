@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [#951](https://github.com/spegel-org/spegel/pull/951) Add tests for channel merge.
 - [#953](https://github.com/spegel-org/spegel/pull/953) Add OCI errors to registry 4xx responses.
 - [#954](https://github.com/spegel-org/spegel/pull/954) Allow setting _default mirrored registry.
+- [#962](https://github.com/spegel-org/spegel/pull/962) Add optional liveness probe.
 
 ### Changed
 
@@ -24,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [#916](https://github.com/spegel-org/spegel/pull/916) Refactor OCI client options and add header configuration.
 - [#931](https://github.com/spegel-org/spegel/pull/931) Cleanup e2e tests to use more standardized node labels.
 - [#932](https://github.com/spegel-org/spegel/pull/932) Switch to using spegel-org images in e2e tests.
+- [#957](https://github.com/spegel-org/spegel/pull/957) Refactor memory store to include descriptor.
+- [#970](https://github.com/spegel-org/spegel/pull/970) Refactor bootstraper to use address info instead of string.
 
 ### Deprecated
 
@@ -37,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [#942](https://github.com/spegel-org/spegel/pull/942) Skip writing headers and status code on mirror retries.
 - [#950](https://github.com/spegel-org/spegel/pull/950) Fix lint errors and add forbidgo.
 - [#955](https://github.com/spegel-org/spegel/pull/955) Cleanup and move set handler to handler functions.
+- [#956](https://github.com/spegel-org/spegel/pull/956) Remove setting logger for klog.
 
 ### Security
 

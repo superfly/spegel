@@ -48,7 +48,7 @@ func TestTrack(t *testing.T) {
 		_, err = hash.Write(b)
 		require.NoError(t, err)
 		dgst := digest.NewDigest(digest.SHA256, hash)
-		ociStore.AddBlob(b, dgst)
+		ociStore.Write(ocispec.Descriptor{Digest: dgst}, b)
 		img, err := oci.ParseImageRequireDigest(imageStr, dgst)
 		require.NoError(t, err)
 		ociStore.AddImage(img)
@@ -80,7 +80,7 @@ func TestTrack(t *testing.T) {
 			router := routing.NewMemoryRouter(map[string][]netip.AddrPort{}, netip.MustParseAddrPort("127.0.0.1:5000"))
 			g, gCtx := errgroup.WithContext(ctx)
 			g.Go(func() error {
-				return Track(gCtx, ociStore, router, tt.resolveLatestTag)
+				return Track(gCtx, ociStore, router, tt.resolveLatestTag, false)
 			})
 			time.Sleep(100 * time.Millisecond)
 

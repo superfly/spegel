@@ -146,6 +146,7 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 		dht.DisableValues(),
 		dht.MaxRecordAge(KeyTTL),
 		dht.BootstrapPeersFunc(bootstrapFunc(ctx, bs, host)),
+		dht.EnableOptimisticProvide(),
 	}
 	kdht, err := dht.New(ctx, host, dhtOpts...)
 	if err != nil {
@@ -163,8 +164,7 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 }
 
 func (r *P2PRouter) Run(ctx context.Context) (err error) {
-	self := fmt.Sprintf("%s/p2p/%s", r.host.Addrs()[0].String(), r.host.ID().String())
-	logr.FromContextOrDiscard(ctx).WithName("p2p").Info("starting p2p router", "id", self)
+	logr.FromContextOrDiscard(ctx).WithName("p2p").Info("starting p2p router", "id", r.host.ID())
 	if err := r.kdht.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("could not bootstrap distributed hash table: %w", err)
 	}
@@ -174,7 +174,7 @@ func (r *P2PRouter) Run(ctx context.Context) (err error) {
 			err = errors.Join(err, cerr)
 		}
 	}()
-	err = r.bootstrapper.Run(ctx, self)
+	err = r.bootstrapper.Run(ctx, *host.InfoFromHost(r.host))
 	if err != nil {
 		return err
 	}
@@ -257,14 +257,14 @@ func (r *P2PRouter) Resolve(ctx context.Context, key string, count int) (<-chan 
 	return peerCh, nil
 }
 
-func (r *P2PRouter) Advertise(ctx context.Context, keys []string) error {
+func (r *P2PRouter) Advertise(ctx context.Context, keys []string, brdcst bool) error {
 	logr.FromContextOrDiscard(ctx).V(4).Info("advertising keys", "host", r.host.ID().String(), "keys", keys)
 	for _, key := range keys {
 		c, err := createCid(key)
 		if err != nil {
 			return err
 		}
-		err = r.rd.Provide(ctx, c, false)
+		err = r.rd.Provide(ctx, c, brdcst)
 		if err != nil {
 			return err
 		}
