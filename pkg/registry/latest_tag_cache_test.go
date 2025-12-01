@@ -44,32 +44,32 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 	t.Logf("Successfully resolved tag to digest: %s", resolvedDigest)
 
 	tests := []struct {
-		name                   string
-		expectedDigest         string
-		expectedStatus         int
-		resolveLatestTag       bool
-		disableMutableTagCache bool
+		name                  string
+		expectedDigest        string
+		expectedStatus        int
+		resolveLatestTag      bool
+		disableLatestTagCache bool
 	}{
 		{
-			name:                   "Default behavior - Serves stale local digest",
-			resolveLatestTag:       true,
-			disableMutableTagCache: false,
-			expectedStatus:         http.StatusOK,
-			expectedDigest:         staleDigest.String(),
+			name:                  "Default behavior - Serves stale local digest",
+			resolveLatestTag:      true,
+			disableLatestTagCache: false,
+			expectedStatus:        http.StatusOK,
+			expectedDigest:        staleDigest.String(),
 		},
 		{
-			name:                   "DisableMutableTagCache=true - Forces upstream check (404 when no peers)",
-			resolveLatestTag:       true,
-			disableMutableTagCache: true,
-			expectedStatus:         http.StatusNotFound,
-			expectedDigest:         "",
+			name:                  "DisableLatestTagCache=true - Forces upstream check (404 when no peers)",
+			resolveLatestTag:      true,
+			disableLatestTagCache: true,
+			expectedStatus:        http.StatusNotFound,
+			expectedDigest:        "",
 		},
 		{
-			name:                   "ResolveLatestTag=false alone - Still serves local cache (BUG)",
-			resolveLatestTag:       false,
-			disableMutableTagCache: false,
-			expectedStatus:         http.StatusOK,
-			expectedDigest:         staleDigest.String(),
+			name:                  "ResolveLatestTag=false alone - Still serves local cache (BUG)",
+			resolveLatestTag:      false,
+			disableLatestTagCache: false,
+			expectedStatus:        http.StatusOK,
+			expectedDigest:        staleDigest.String(),
 		},
 	}
 
@@ -82,7 +82,7 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 				memStore,
 				router,
 				WithResolveLatestTag(tt.resolveLatestTag),
-				WithDisableMutableTagCache(tt.disableMutableTagCache),
+				WithDisableLatestTagCache(tt.disableLatestTagCache),
 			)
 			require.NoError(t, err)
 
