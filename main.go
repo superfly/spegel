@@ -59,7 +59,7 @@ type RegistryCmd struct {
 	MirrorResolveTimeout         time.Duration `arg:"--mirror-resolve-timeout,env:MIRROR_RESOLVE_TIMEOUT" default:"20ms" help:"Max duration spent finding a mirror."`
 	MirrorResolveRetries         int           `arg:"--mirror-resolve-retries,env:MIRROR_RESOLVE_RETRIES" default:"3" help:"Max amount of mirrors to attempt."`
 	ResolveLatestTag             bool          `arg:"--resolve-latest-tag,env:RESOLVE_LATEST_TAG" default:"true" help:"When true latest tags will be resolved to digests."`
-	DisableLatestTagCache        bool          `arg:"--disable-latest-tag-cache,env:DISABLE_LATEST_TAG_CACHE" default:"false" help:"When true mutable tags like latest will not be served from local cache."`
+	DisableLatestTagCache        bool          `arg:"--disable-latest-tag-cache,env:DISABLE_LATEST_TAG_CACHE" default:"false" help:"When true the latest tag will not be served from local cache."`
 	DebugWebEnabled              bool          `arg:"--debug-web-enabled,env:DEBUG_WEB_ENABLED" default:"false" help:"When true enables debug web page."`
 }
 
