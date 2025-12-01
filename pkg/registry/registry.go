@@ -25,13 +25,14 @@ const (
 )
 
 type RegistryConfig struct {
-	Transport        http.RoundTripper
-	Log              logr.Logger
-	Username         string
-	Password         string
-	ResolveRetries   int
-	ResolveLatestTag bool
-	ResolveTimeout   time.Duration
+	Transport              http.RoundTripper
+	Log                    logr.Logger
+	Username               string
+	Password               string
+	ResolveRetries         int
+	ResolveLatestTag       bool
+	ResolveTimeout         time.Duration
+	DisableMutableTagCache bool
 }
 
 func (cfg *RegistryConfig) Apply(opts ...RegistryOption) error {
@@ -69,6 +70,13 @@ func WithResolveTimeout(resolveTimeout time.Duration) RegistryOption {
 	}
 }
 
+func WithDisableMutableTagCache(disableMutableTagCache bool) RegistryOption {
+	return func(cfg *RegistryConfig) error {
+		cfg.DisableMutableTagCache = disableMutableTagCache
+		return nil
+	}
+}
+
 func WithTransport(transport http.RoundTripper) RegistryOption {
 	return func(cfg *RegistryConfig) error {
 		cfg.Transport = transport
@@ -92,16 +100,17 @@ func WithBasicAuth(username, password string) RegistryOption {
 }
 
 type Registry struct {
-	bufferPool       *sync.Pool
-	log              logr.Logger
-	ociStore         oci.Store
-	ociClient        *oci.Client
-	router           routing.Router
-	username         string
-	password         string
-	resolveRetries   int
-	resolveTimeout   time.Duration
-	resolveLatestTag bool
+	bufferPool             *sync.Pool
+	log                    logr.Logger
+	ociStore               oci.Store
+	ociClient              *oci.Client
+	router                 routing.Router
+	username               string
+	password               string
+	resolveRetries         int
+	resolveTimeout         time.Duration
+	resolveLatestTag       bool
+	disableMutableTagCache bool
 }
 
 func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOption) (*Registry, error) {
@@ -136,16 +145,17 @@ func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOpti
 	}
 
 	r := &Registry{
-		ociStore:         ociStore,
-		router:           router,
-		ociClient:        ociClient,
-		log:              cfg.Log,
-		resolveRetries:   cfg.ResolveRetries,
-		resolveLatestTag: cfg.ResolveLatestTag,
-		resolveTimeout:   cfg.ResolveTimeout,
-		username:         cfg.Username,
-		password:         cfg.Password,
-		bufferPool:       bufferPool,
+		ociStore:               ociStore,
+		router:                 router,
+		ociClient:              ociClient,
+		log:                    cfg.Log,
+		resolveRetries:         cfg.ResolveRetries,
+		resolveLatestTag:       cfg.ResolveLatestTag,
+		resolveTimeout:         cfg.ResolveTimeout,
+		username:               cfg.Username,
+		password:               cfg.Password,
+		bufferPool:             bufferPool,
+		disableMutableTagCache: cfg.DisableMutableTagCache,
 	}
 	return r, nil
 }
@@ -209,6 +219,13 @@ func (r *Registry) registryHandler(rw httpx.ResponseWriter, req *http.Request) {
 
 	// Request with mirror header are proxied.
 	if req.Header.Get(HeaderSpegelMirrored) != "true" {
+		// If DisableMutableTagCache is enabled, skip local cache for mutable tags like "latest"
+		// to ensure we always get the most up-to-date digest from upstream or peers.
+		if r.disableMutableTagCache && dist.Digest == "" && dist.IsLatestTag() {
+			r.mirrorHandler(rw, req, dist)
+			return
+		}
+
 		// If content is present locally we should skip the mirroring and just serve it.
 		var ociErr error
 		if dist.Digest == "" {
