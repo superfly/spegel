@@ -219,7 +219,7 @@ func (r *Registry) registryHandler(rw httpx.ResponseWriter, req *http.Request) {
 
 	// Request with mirror header are proxied.
 	if req.Header.Get(HeaderSpegelMirrored) != "true" {
-		// If DisableLatestTagCache is enabled, skip local cache for mutable tags like "latest"
+		// If DisableLatestTagCache is enabled, skip local cache for "latest" tags
 		// to ensure we always get the most up-to-date digest from upstream or peers.
 		if r.disableLatestTagCache && dist.Digest == "" && dist.IsLatestTag() {
 			r.mirrorHandler(rw, req, dist)
