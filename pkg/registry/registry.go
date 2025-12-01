@@ -29,10 +29,10 @@ type RegistryConfig struct {
 	Log                   logr.Logger
 	Username              string
 	Password              string
+	Push                  PushConfig
+	ResolveTimeout        time.Duration
 	ResolveRetries        int
 	ResolveLatestTag      bool
-	ResolveTimeout        time.Duration
-	Push                  PushConfig
 	DisableLatestTagCache bool
 }
 
@@ -108,19 +108,19 @@ func WithPushConfig(pushConfig PushConfig) RegistryOption {
 }
 
 type Registry struct {
-	bufferPool            *sync.Pool
-	log                   logr.Logger
 	ociStore              oci.Store
-	ociClient             *oci.Client
 	router                routing.Router
+	log                   logr.Logger
+	bufferPool            *sync.Pool
+	ociClient             *oci.Client
 	username              string
 	password              string
-	resolveRetries        int
+	addr                  string
+	push                  PushConfig
 	resolveTimeout        time.Duration
+	resolveRetries        int
 	resolveLatestTag      bool
 	disableLatestTagCache bool
-	push                  PushConfig
-	addr                  string
 }
 
 func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOption) (*Registry, error) {
