@@ -25,14 +25,15 @@ const (
 )
 
 type RegistryConfig struct {
-	Transport        http.RoundTripper
-	Log              logr.Logger
-	Username         string
-	Password         string
-	ResolveRetries   int
-	ResolveLatestTag bool
-	ResolveTimeout   time.Duration
-	Push             PushConfig
+	Transport             http.RoundTripper
+	Log                   logr.Logger
+	Username              string
+	Password              string
+	Push                  PushConfig
+	ResolveTimeout        time.Duration
+	ResolveRetries        int
+	ResolveLatestTag      bool
+	DisableLatestTagCache bool
 }
 
 func (cfg *RegistryConfig) Apply(opts ...RegistryOption) error {
@@ -70,6 +71,13 @@ func WithResolveTimeout(resolveTimeout time.Duration) RegistryOption {
 	}
 }
 
+func WithDisableLatestTagCache(disableLatestTagCache bool) RegistryOption {
+	return func(cfg *RegistryConfig) error {
+		cfg.DisableLatestTagCache = disableLatestTagCache
+		return nil
+	}
+}
+
 func WithTransport(transport http.RoundTripper) RegistryOption {
 	return func(cfg *RegistryConfig) error {
 		cfg.Transport = transport
@@ -100,18 +108,19 @@ func WithPushConfig(pushConfig PushConfig) RegistryOption {
 }
 
 type Registry struct {
-	bufferPool       *sync.Pool
-	log              logr.Logger
-	ociStore         oci.Store
-	ociClient        *oci.Client
-	router           routing.Router
-	username         string
-	password         string
-	resolveRetries   int
-	resolveTimeout   time.Duration
-	resolveLatestTag bool
-	push             PushConfig
-	addr             string
+	ociStore              oci.Store
+	router                routing.Router
+	log                   logr.Logger
+	bufferPool            *sync.Pool
+	ociClient             *oci.Client
+	username              string
+	password              string
+	addr                  string
+	push                  PushConfig
+	resolveTimeout        time.Duration
+	resolveRetries        int
+	resolveLatestTag      bool
+	disableLatestTagCache bool
 }
 
 func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOption) (*Registry, error) {
@@ -147,17 +156,18 @@ func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOpti
 	}
 
 	r := &Registry{
-		ociStore:         ociStore,
-		router:           router,
-		ociClient:        ociClient,
-		log:              cfg.Log,
-		resolveRetries:   cfg.ResolveRetries,
-		resolveLatestTag: cfg.ResolveLatestTag,
-		resolveTimeout:   cfg.ResolveTimeout,
-		username:         cfg.Username,
-		password:         cfg.Password,
-		bufferPool:       bufferPool,
-		push:             cfg.Push,
+		ociStore:              ociStore,
+		router:                router,
+		ociClient:             ociClient,
+		log:                   cfg.Log,
+		resolveRetries:        cfg.ResolveRetries,
+		resolveLatestTag:      cfg.ResolveLatestTag,
+		resolveTimeout:        cfg.ResolveTimeout,
+		username:              cfg.Username,
+		password:              cfg.Password,
+		bufferPool:            bufferPool,
+		push:                  cfg.Push,
+		disableLatestTagCache: cfg.DisableLatestTagCache,
 	}
 	return r, nil
 }
@@ -167,6 +177,7 @@ func (r *Registry) Handler() *httpx.ServeMux {
 	m.Handle("GET /readyz", r.readyHandler)
 	m.Handle("GET /livez", r.livenesHandler)
 	m.Handle("GET /v2/", r.registryHandler)
+	m.Handle("HEAD /v2/", r.registryHandler)
 	if r.push.Enabled {
 		m.Handle("GET /v2/{app_name}/blobs/uploads/{uuid}", r.pushHandler)
 		m.Handle("PUT /v2/", r.pushHandler)
@@ -236,6 +247,13 @@ func (r *Registry) registryHandler(rw httpx.ResponseWriter, req *http.Request) {
 
 	// Request with mirror header are proxied.
 	if req.Header.Get(HeaderSpegelMirrored) != "true" {
+		// If DisableLatestTagCache is enabled, skip local cache for "latest" tags
+		// to ensure we always get the most up-to-date digest from upstream or peers.
+		if r.disableLatestTagCache && dist.Digest == "" && dist.IsLatestTag() {
+			r.mirrorHandler(rw, req, dist)
+			return
+		}
+
 		// If content is present locally we should skip the mirroring and just serve it.
 		var ociErr error
 		if dist.Digest == "" {
