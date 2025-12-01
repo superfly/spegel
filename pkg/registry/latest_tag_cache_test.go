@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spegel-org/spegel/pkg/oci"
 	"github.com/spegel-org/spegel/pkg/routing"
 	"github.com/stretchr/testify/require"
@@ -43,7 +44,10 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 		},
 		"layers": []
 	}`)
-	memStore.AddBlob(manifestJSON, staleDigest)
+	memStore.Write(ocispec.Descriptor{
+		Digest:    staleDigest,
+		MediaType: ocispec.MediaTypeImageManifest,
+	}, manifestJSON)
 
 	// Setup a "fresh" digest for the upstream/peer test
 	freshDigest := digest.Digest("sha256:9999999999999999999999999999999999999999999999999999999999999999")
@@ -107,7 +111,10 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 				img, err := oci.NewImage("example.com", "foo/bar", latestTagName, freshDigest)
 				require.NoError(t, err)
 				peerStore.AddImage(img)
-				peerStore.AddBlob(freshManifestJSON, freshDigest)
+				peerStore.Write(ocispec.Descriptor{
+					Digest:    freshDigest,
+					MediaType: ocispec.MediaTypeImageManifest,
+				}, freshManifestJSON)
 
 				// Create peer server
 				// We need a router for the peer too, but it doesn't need to know about anything

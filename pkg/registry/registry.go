@@ -25,15 +25,15 @@ const (
 )
 
 type RegistryConfig struct {
-	Transport        http.RoundTripper
-	Log              logr.Logger
-	Username         string
-	Password         string
-	ResolveRetries   int
-	ResolveLatestTag bool
-	ResolveTimeout   time.Duration
-	Push             PushConfig
-  DisableLatestTagCache bool
+	Transport             http.RoundTripper
+	Log                   logr.Logger
+	Username              string
+	Password              string
+	ResolveRetries        int
+	ResolveLatestTag      bool
+	ResolveTimeout        time.Duration
+	Push                  PushConfig
+	DisableLatestTagCache bool
 }
 
 func (cfg *RegistryConfig) Apply(opts ...RegistryOption) error {
@@ -108,19 +108,19 @@ func WithPushConfig(pushConfig PushConfig) RegistryOption {
 }
 
 type Registry struct {
-	bufferPool       *sync.Pool
-	log              logr.Logger
-	ociStore         oci.Store
-	ociClient        *oci.Client
-	router           routing.Router
-	username         string
-	password         string
-	resolveRetries   int
-	resolveTimeout   time.Duration
-	resolveLatestTag bool
-  disableLatestTagCache bool
-	push             PushConfig
-	addr             string
+	bufferPool            *sync.Pool
+	log                   logr.Logger
+	ociStore              oci.Store
+	ociClient             *oci.Client
+	router                routing.Router
+	username              string
+	password              string
+	resolveRetries        int
+	resolveTimeout        time.Duration
+	resolveLatestTag      bool
+	disableLatestTagCache bool
+	push                  PushConfig
+	addr                  string
 }
 
 func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOption) (*Registry, error) {
@@ -156,18 +156,18 @@ func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOpti
 	}
 
 	r := &Registry{
-		ociStore:         ociStore,
-		router:           router,
-		ociClient:        ociClient,
-		log:              cfg.Log,
-		resolveRetries:   cfg.ResolveRetries,
-		resolveLatestTag: cfg.ResolveLatestTag,
-		resolveTimeout:   cfg.ResolveTimeout,
-		username:         cfg.Username,
-		password:         cfg.Password,
-		bufferPool:       bufferPool,
-		push:             cfg.Push,
-    disableLatestTagCache: cfg.DisableLatestTagCache,
+		ociStore:              ociStore,
+		router:                router,
+		ociClient:             ociClient,
+		log:                   cfg.Log,
+		resolveRetries:        cfg.ResolveRetries,
+		resolveLatestTag:      cfg.ResolveLatestTag,
+		resolveTimeout:        cfg.ResolveTimeout,
+		username:              cfg.Username,
+		password:              cfg.Password,
+		bufferPool:            bufferPool,
+		push:                  cfg.Push,
+		disableLatestTagCache: cfg.DisableLatestTagCache,
 	}
 	return r, nil
 }
@@ -177,6 +177,7 @@ func (r *Registry) Handler() *httpx.ServeMux {
 	m.Handle("GET /readyz", r.readyHandler)
 	m.Handle("GET /livez", r.livenesHandler)
 	m.Handle("GET /v2/", r.registryHandler)
+	m.Handle("HEAD /v2/", r.registryHandler)
 	if r.push.Enabled {
 		m.Handle("GET /v2/{app_name}/blobs/uploads/{uuid}", r.pushHandler)
 		m.Handle("PUT /v2/", r.pushHandler)
