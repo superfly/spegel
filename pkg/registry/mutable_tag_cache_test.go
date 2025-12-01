@@ -45,10 +45,10 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 
 	tests := []struct {
 		name                   string
+		expectedDigest         string
+		expectedStatus         int
 		resolveLatestTag       bool
 		disableMutableTagCache bool
-		expectedStatus         int
-		expectedDigest         string
 	}{
 		{
 			name:                   "Default behavior - Serves stale local digest",
@@ -75,6 +75,7 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			// Setup Registry
 			router := routing.NewMemoryRouter(map[string][]netip.AddrPort{}, netip.AddrPort{})
 			reg, err := NewRegistry(
@@ -91,7 +92,7 @@ func TestResolveLatestTag_StaleDigest(t *testing.T) {
 			// Make a request for the manifest by TAG
 			url := fmt.Sprintf("%s/v2/foo/bar/manifests/%s?ns=example.com", srv.URL, tagName)
 			t.Logf("Requesting URL: %s", url)
-			req, err := http.NewRequest(http.MethodGet, url, nil)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 			require.NoError(t, err)
 
 			// The registry handler checks for local content first.

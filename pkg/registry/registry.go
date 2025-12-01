@@ -29,9 +29,9 @@ type RegistryConfig struct {
 	Log                    logr.Logger
 	Username               string
 	Password               string
+	ResolveTimeout         time.Duration
 	ResolveRetries         int
 	ResolveLatestTag       bool
-	ResolveTimeout         time.Duration
 	DisableMutableTagCache bool
 }
 
