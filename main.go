@@ -54,6 +54,7 @@ type RegistryCmd struct {
 	DataDir                      string        `arg:"--data-dir,env:DATA_DIR" default:"/var/lib/spegel" help:"Directory where Spegel persists data."`
 	RouterAddr                   string        `arg:"--router-addr,env:ROUTER_ADDR" default:":5001" help:"address to serve router."`
 	RegistryAddr                 string        `arg:"--registry-addr,env:REGISTRY_ADDR" default:":5000" help:"address to server image registry."`
+	ClusterID                    string        `arg:"--cluster-id,env:CLUSTER_ID" help:"Cluster identifier for DHT isolation."`
 	MirroredRegistries           []string      `arg:"--mirrored-registries,env:MIRRORED_REGISTRIES" help:"Registries that are configured to be mirrored, if slice is empty all registires are mirrored."`
 	MirrorResolveTimeout         time.Duration `arg:"--mirror-resolve-timeout,env:MIRROR_RESOLVE_TIMEOUT" default:"20ms" help:"Max duration spent finding a mirror."`
 	MirrorResolveRetries         int           `arg:"--mirror-resolve-retries,env:MIRROR_RESOLVE_RETRIES" default:"3" help:"Max amount of mirrors to attempt."`
@@ -163,7 +164,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 	routerOpts := []routing.P2PRouterOption{
 		routing.WithDataDir(args.DataDir),
 	}
-	router, err := routing.NewP2PRouter(ctx, args.RouterAddr, bootstrapper, registryPort, routerOpts...)
+	router, err := routing.NewP2PRouter(ctx, args.RouterAddr, bootstrapper, registryPort, args.ClusterID, routerOpts...)
 	if err != nil {
 		return err
 	}
