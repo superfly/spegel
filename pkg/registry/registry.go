@@ -177,7 +177,6 @@ func (r *Registry) Handler() *httpx.ServeMux {
 	m.Handle("GET /readyz", r.readyHandler)
 	m.Handle("GET /livez", r.livenesHandler)
 	m.Handle("GET /v2/", r.registryHandler)
-	m.Handle("HEAD /v2/", r.registryHandler)
 	if r.push.Enabled {
 		m.Handle("GET /v2/{app_name}/blobs/uploads/{uuid}", r.pushHandler)
 		m.Handle("PUT /v2/", r.pushHandler)
