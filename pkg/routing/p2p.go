@@ -23,6 +23,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/sec"
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	ma "github.com/multiformats/go-multiaddr"
@@ -79,7 +80,7 @@ type P2PRouter struct {
 	registryPort uint16
 }
 
-func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPortStr string, opts ...P2PRouterOption) (*P2PRouter, error) {
+func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPortStr, clusterID string, opts ...P2PRouterOption) (*P2PRouter, error) {
 	cfg := P2PRouterConfig{}
 	err := cfg.Apply(opts...)
 	if err != nil {
@@ -140,9 +141,15 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 		return nil, fmt.Errorf("expected single host address but got %d %s", len(addrs), strings.Join(addrs, ", "))
 	}
 
+	protocolPrefix := "/spegel"
+	if clusterID != "" {
+		protocolPrefix = fmt.Sprintf("/spegel/%s", clusterID)
+	}
+	logr.FromContextOrDiscard(ctx).Info("creating P2P router", "protocol_prefix", protocolPrefix)
+
 	dhtOpts := []dht.Option{
 		dht.Mode(dht.ModeServer),
-		dht.ProtocolPrefix("/spegel"),
+		dht.ProtocolPrefix(protocol.ID(protocolPrefix)),
 		dht.DisableValues(),
 		dht.MaxRecordAge(KeyTTL),
 		dht.BootstrapPeersFunc(bootstrapFunc(ctx, bs, host)),
