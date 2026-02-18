@@ -73,6 +73,16 @@ func TestProbeHandlers(t *testing.T) {
 	require.Equal(t, http.StatusOK, rw.Result().StatusCode)
 }
 
+func TestHandlerWithPushEnabled(t *testing.T) {
+	t.Parallel()
+
+	reg, err := NewRegistry(nil, nil, WithPushConfig(PushConfig{Enabled: true}))
+	require.NoError(t, err)
+	require.NotPanics(t, func() {
+		_ = reg.Handler()
+	})
+}
+
 func TestBasicAuth(t *testing.T) {
 	t.Parallel()
 
