@@ -40,7 +40,7 @@ func TestP2PRouter(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 
 	bs := NewStaticBootstrapper(nil)
-	router, err := NewP2PRouter(ctx, "localhost:0", bs, "9090")
+	router, err := NewP2PRouter(ctx, "localhost:0", bs, "9090", "")
 	require.NoError(t, err)
 
 	g, gCtx := errgroup.WithContext(ctx)
@@ -75,7 +75,7 @@ func TestReady(t *testing.T) {
 	t.Parallel()
 
 	bs := NewStaticBootstrapper(nil)
-	router, err := NewP2PRouter(t.Context(), "localhost:0", bs, "9090")
+	router, err := NewP2PRouter(t.Context(), "localhost:0", bs, "9090", "")
 	require.NoError(t, err)
 
 	// Should not be ready if no peers are found.
