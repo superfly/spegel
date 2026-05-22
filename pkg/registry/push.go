@@ -233,6 +233,8 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	defer w.Close()
+
 	if _, err = io.Copy(w, req.Body); err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
