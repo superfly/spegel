@@ -62,6 +62,16 @@ func uploadRef(id string) string {
 	return ("spegel-upload:") + id
 }
 
+// abortIngest cancels an in-progress content writer. Uses a detached
+// background context so cleanup still runs when the request was cancelled.
+func (r *Registry) abortIngest(cs content.Store, ref string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := cs.Abort(ctx, ref); err != nil && !errdefs.IsNotFound(err) {
+		r.log.Error(err, "failed to abort ingest", "ref", ref)
+	}
+}
+
 func withSource(dist oci.DistributionPath) content.Opt {
 	return content.WithLabels(map[string]string{labels.LabelDistributionSource + "." + dist.Registry: dist.Name})
 }
@@ -166,12 +176,19 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		return
 	}
 
-	w, err := cs.Writer(ctx, content.WithRef(uploadRef(uuid.NewString())))
+	ref := uploadRef(uuid.NewString())
+	w, err := cs.Writer(ctx, content.WithRef(ref))
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
-	defer w.Close()
+	committed := false
+	defer func() {
+		w.Close()
+		if !committed {
+			r.abortIngest(cs, ref)
+		}
+	}()
 
 	n, err := io.Copy(w, req.Body)
 	if err != nil {
@@ -182,6 +199,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	committed = true
 	r.advertise(dist.Digest)
 
 	created(rw, dist)
@@ -256,7 +274,13 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
-	defer w.Close()
+	committed := false
+	defer func() {
+		w.Close()
+		if !committed {
+			r.abortIngest(cs, ref)
+		}
+	}()
 
 	// final chunk
 	if _, err = io.Copy(w, req.Body); err != nil {
@@ -273,6 +297,7 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	committed = true
 	r.advertise(dist.Digest)
 
 	dist.Kind = oci.DistributionKindBlob
@@ -317,13 +342,20 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	}
 
 	cs := client.ContentStore()
-	w, err := cs.Writer(ctx, content.WithRef(dist.Reference()))
+	manifestRef := dist.Reference()
+	w, err := cs.Writer(ctx, content.WithRef(manifestRef))
 	if err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 	if err == nil {
-		defer w.Close()
+		committed := false
+		defer func() {
+			w.Close()
+			if !committed {
+				r.abortIngest(cs, manifestRef)
+			}
+		}()
 		if _, err := io.Copy(w, bytes.NewReader(body)); err != nil {
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
@@ -332,6 +364,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			rw.WriteError(http.StatusInternalServerError, err)
 			return
 		}
+		committed = true
 	}
 
 	ref := dist.Reference()
