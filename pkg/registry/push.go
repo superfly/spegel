@@ -260,10 +260,12 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	ref := uploadRef(dist.Session)
 	desc := ocispec.Descriptor{Digest: dist.Digest}
-	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
+	w, err := cs.Writer(ctx, content.WithRef(ref), content.WithDescriptor(desc))
 	if errdefs.IsAlreadyExists(err) {
 		// Another concurrent upload may have already provided this content digest.
+		r.abortIngest(cs, ref)
 		dist.Kind = oci.DistributionKindBlob
 		created(rw, dist)
 		return
