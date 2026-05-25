@@ -58,8 +58,63 @@ func (r *Registry) withLease(ctx context.Context) (context.Context, error) {
 	return leases.WithLease(ctx, l.ID), nil
 }
 
+// createSessionLease creates a lease keyed off the upload session and returns
+// a leased ctx.
+func (r *Registry) createSessionLease(ctx context.Context, session string, dist oci.DistributionPath) (context.Context, error) {
+	if r.push.LeaseDuration == 0 {
+		return ctx, nil
+	}
+	cdc, _, err := r.getContainerdClient()
+	if err != nil {
+		return nil, err
+	}
+	id := uploadLeaseID(session)
+	_, err = cdc.LeasesService().Create(ctx,
+		leases.WithID(id),
+		leases.WithExpiration(r.push.LeaseDuration),
+		leases.WithLabels(map[string]string{
+			"spegel.org/upload-registry": dist.Registry,
+			"spegel.org/upload-name":     dist.Name,
+		}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session lease: %w", err)
+	}
+	return leases.WithLease(ctx, id), nil
+}
+
+// withSessionLease attaches an existing session lease to ctx when leasing is enabled.
+func (r *Registry) withSessionLease(ctx context.Context, session string) context.Context {
+	if r.push.LeaseDuration == 0 {
+		return ctx
+	}
+	return leases.WithLease(ctx, uploadLeaseID(session))
+}
+
+// deleteSessionLease removes the lease for this session. Used on failure paths
+// to trigger lease-driven ingest GC immediately instead of waiting for expiry.
+func (r *Registry) deleteSessionLease(session string) {
+	if r.push.LeaseDuration == 0 {
+		return
+	}
+	cdc, _, err := r.getContainerdClient()
+	if err != nil {
+		r.log.Error(err, "failed to get containerd client for lease delete")
+		return
+	}
+	// Use background context so cleanup runs when the request was cancelled.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := cdc.LeasesService().Delete(ctx, leases.Lease{ID: uploadLeaseID(session)}); err != nil && !errdefs.IsNotFound(err) {
+		r.log.Error(err, "failed to delete session lease", "session", session)
+	}
+}
+
 func uploadRef(id string) string {
 	return ("spegel-upload:") + id
+}
+
+func uploadLeaseID(session string) string {
+	return "spegel-upload-" + session
 }
 
 func withSource(dist oci.DistributionPath) content.Opt {
@@ -160,13 +215,20 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "invalid digest", err.Error()))
 		return
 	}
-	ctx, err := r.withLease(req.Context())
+	session := uuid.NewString()
+	ctx, err := r.createSessionLease(req.Context(), session, dist)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	success := false
+	defer func() {
+		if !success {
+			r.deleteSessionLease(session)
+		}
+	}()
 
-	w, err := cs.Writer(ctx, content.WithRef(uploadRef(uuid.NewString())))
+	w, err := cs.Writer(ctx, content.WithRef(uploadRef(session)))
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
@@ -182,6 +244,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	success = true
 	r.advertise(dist.Digest)
 
 	created(rw, dist)
@@ -189,8 +252,14 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 
 func (r *Registry) handleBlobUploadStart(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
 	dist.Session = uuid.NewString()
-	w, err := cs.Writer(req.Context(), content.WithRef(uploadRef(dist.Session)))
+	ctx, err := r.createSessionLease(req.Context(), dist.Session, dist)
 	if err != nil {
+		rw.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)))
+	if err != nil {
+		r.deleteSessionLease(dist.Session)
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -200,11 +269,7 @@ func (r *Registry) handleBlobUploadStart(rw httpx.ResponseWriter, req *http.Requ
 }
 
 func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
-	ctx, err := r.withLease(req.Context())
-	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
-		return
-	}
+	ctx := r.withSessionLease(req.Context(), dist.Session)
 
 	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)))
 	if errdefs.IsNotFound(err) {
@@ -215,6 +280,8 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	defer w.Close()
+
 	if _, err = io.Copy(w, req.Body); err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
@@ -235,15 +302,21 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "invalid digest", err.Error()))
 		return
 	}
-	ctx, err := r.withLease(req.Context())
-	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
-		return
-	}
+	ctx := r.withSessionLease(req.Context(), dist.Session)
+	success := false
+	defer func() {
+		if !success {
+			r.deleteSessionLease(dist.Session)
+		}
+	}()
+
 	desc := ocispec.Descriptor{Digest: dist.Digest}
 	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
 	if errdefs.IsAlreadyExists(err) {
 		// Another concurrent upload may have already provided this content digest.
+		// containerd has attached the existing blob to our session lease, so keep
+		// the lease alive.
+		success = true
 		dist.Kind = oci.DistributionKindBlob
 		created(rw, dist)
 		return
@@ -273,6 +346,7 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
 	}
+	success = true
 	r.advertise(dist.Digest)
 
 	dist.Kind = oci.DistributionKindBlob
