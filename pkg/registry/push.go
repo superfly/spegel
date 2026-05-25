@@ -60,7 +60,7 @@ func (r *Registry) withLease(ctx context.Context) (context.Context, error) {
 
 // createSessionLease creates a lease keyed off the upload session and returns
 // a leased ctx.
-func (r *Registry) createSessionLease(ctx context.Context, session string) (context.Context, error) {
+func (r *Registry) createSessionLease(ctx context.Context, session string, dist oci.DistributionPath) (context.Context, error) {
 	if r.push.LeaseDuration == 0 {
 		return ctx, nil
 	}
@@ -71,7 +71,11 @@ func (r *Registry) createSessionLease(ctx context.Context, session string) (cont
 	id := uploadLeaseID(session)
 	_, err = cdc.LeasesService().Create(ctx,
 		leases.WithID(id),
-		leases.WithExpiration(r.push.LeaseDuration))
+		leases.WithExpiration(r.push.LeaseDuration),
+		leases.WithLabels(map[string]string{
+			"spegel.org/upload-registry": dist.Registry,
+			"spegel.org/upload-name":     dist.Name,
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session lease: %w", err)
 	}
@@ -212,7 +216,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 		return
 	}
 	session := uuid.NewString()
-	ctx, err := r.createSessionLease(req.Context(), session)
+	ctx, err := r.createSessionLease(req.Context(), session, dist)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
@@ -248,7 +252,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 
 func (r *Registry) handleBlobUploadStart(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
 	dist.Session = uuid.NewString()
-	ctx, err := r.createSessionLease(req.Context(), dist.Session)
+	ctx, err := r.createSessionLease(req.Context(), dist.Session, dist)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
 		return
