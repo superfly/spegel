@@ -12,8 +12,10 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/go-logr/logr v1.4.3
+	github.com/google/btree v1.1.3
 	github.com/google/uuid v1.6.0
 	github.com/ipfs/go-cid v0.5.0
+	github.com/ipfs/go-datastore v0.8.2
 	github.com/libp2p/go-libp2p v0.43.0
 	github.com/libp2p/go-libp2p-kad-dht v0.34.0
 	github.com/miekg/dns v1.1.68
@@ -74,7 +76,7 @@ require (
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/ipfs/boxo v0.33.1 // indirect
-	github.com/ipfs/go-datastore v0.8.2 // indirect
+	github.com/ipfs/go-detect-race v0.0.1 // indirect
 	github.com/ipfs/go-log/v2 v2.8.0 // indirect
 	github.com/ipld/go-ipld-prime v0.21.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
