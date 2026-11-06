@@ -64,7 +64,7 @@ func (r *Registry) createSessionLease(ctx context.Context, session string, dist 
 	if r.push.LeaseDuration == 0 {
 		return ctx, nil
 	}
-	cdc, _, err := r.getContainerdClient()
+	cdc, err := r.getContainerdClient()
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (r *Registry) deleteSessionLease(session string) {
 	if r.push.LeaseDuration == 0 {
 		return
 	}
-	cdc, _, err := r.getContainerdClient()
+	cdc, err := r.getContainerdClient()
 	if err != nil {
 		r.log.Error(err, "failed to get containerd client for lease delete")
 		return
@@ -159,11 +159,12 @@ func (r *Registry) pushHandler(rw httpx.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	cdc, cs, err := r.getContainerdClient()
+	cdc, err := r.getContainerdClient()
 	if err != nil {
 		rw.WriteError(http.StatusMethodNotAllowed, oci.NewDistributionError(oci.ErrCodeUnsupported, err.Error(), nil))
 		return
 	}
+	cs := cdc.ContentStore()
 
 	if dist.Kind == oci.DistributionKindUpload {
 		if req.Method == http.MethodPost && dist.Session == "" {
@@ -198,16 +199,12 @@ func (r *Registry) pushHandler(rw httpx.ResponseWriter, req *http.Request) {
 	rw.WriteError(http.StatusNotFound, oci.NewDistributionError(oci.ErrCodeUnsupported, "unsupported push endpoint", nil))
 }
 
-func (r *Registry) getContainerdClient() (*client.Client, content.Store, error) {
+func (r *Registry) getContainerdClient() (*client.Client, error) {
 	cd, ok := r.ociStore.(*oci.Containerd)
 	if !ok {
-		return nil, nil, errors.New("push requires containerd store")
+		return nil, errors.New("push requires containerd store")
 	}
-	cdc, err := cd.Client()
-	if err != nil {
-		return nil, nil, err
-	}
-	return cdc, cdc.ContentStore(), nil
+	return cd.Client()
 }
 
 func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
