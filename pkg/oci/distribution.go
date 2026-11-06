@@ -15,8 +15,6 @@ import (
 var (
 	repoRegexStr        = `([a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*)`
 	tagRegexStr         = `([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})`
-	repoRegex           = regexp.MustCompile(`^` + repoRegexStr + `$`)
-	tagRegex            = regexp.MustCompile(`^` + tagRegexStr + `$`)
 	manifestRegexTag    = regexp.MustCompile(`/v2/` + repoRegexStr + `/manifests/` + tagRegexStr + `$`)
 	manifestRegexDigest = regexp.MustCompile(`/v2/` + repoRegexStr + `/manifests/(.*)`)
 	blobsRegexDigest    = regexp.MustCompile(`/v2/` + repoRegexStr + `/blobs/(.*)`)

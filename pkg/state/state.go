@@ -13,7 +13,7 @@ import (
 	"github.com/spegel-org/spegel/pkg/routing"
 )
 
-func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatestTag bool, brdcst bool) error {
+func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatestTag, brdcst bool) error {
 	log := logr.FromContextOrDiscard(ctx)
 	eventCh, err := ociStore.Subscribe(ctx)
 	if err != nil {

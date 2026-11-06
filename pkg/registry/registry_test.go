@@ -54,21 +54,21 @@ func TestProbeHandlers(t *testing.T) {
 	require.NoError(t, err)
 
 	rw := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://localhost/readyz", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/readyz", nil)
 	srv.Handler.ServeHTTP(rw, req)
 	require.Equal(t, http.StatusInternalServerError, rw.Result().StatusCode)
 	rw = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "http://localhost/livez", nil)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/livez", nil)
 	srv.Handler.ServeHTTP(rw, req)
 	require.Equal(t, http.StatusOK, rw.Result().StatusCode)
 
 	router.Add("foo", netip.MustParseAddrPort("127.0.0.1:9090"))
 	rw = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "http://localhost/readyz", nil)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/readyz", nil)
 	srv.Handler.ServeHTTP(rw, req)
 	require.Equal(t, http.StatusOK, rw.Result().StatusCode)
 	rw = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "http://localhost/livez", nil)
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/livez", nil)
 	srv.Handler.ServeHTTP(rw, req)
 	require.Equal(t, http.StatusOK, rw.Result().StatusCode)
 }
@@ -148,7 +148,7 @@ func TestBasicAuth(t *testing.T) {
 			reg, err := NewRegistry(nil, nil, WithBasicAuth(tt.username, tt.password))
 			require.NoError(t, err)
 			rw := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "http://localhost/v2/", nil)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/v2/", nil)
 			req.SetBasicAuth(tt.reqUsername, tt.reqPassword)
 			srv, err := reg.Server("")
 			require.NoError(t, err)
@@ -262,7 +262,7 @@ func TestRegistryHandler(t *testing.T) {
 
 				target := fmt.Sprintf("http://example.com/v2/foo/bar/blobs/%s", tt.key)
 				rw := httptest.NewRecorder()
-				req := httptest.NewRequest(method, target, nil)
+				req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
 				handler.ServeHTTP(rw, req)
 
 				resp := rw.Result()
