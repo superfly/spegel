@@ -55,6 +55,12 @@ linters:
           alias: cid
         - pkg: github.com/libp2p/go-libp2p-kad-dht
           alias: dht
+        - pkg: github.com/ipfs/go-datastore
+          alias: ds
+        - pkg: github.com/ipfs/go-datastore/query
+          alias: dsq
+        - pkg: github.com/ipfs/go-datastore/test
+          alias: dstest
         - pkg: github.com/libp2p/go-libp2p/p2p/net/mock
           alias: mocknet
         - pkg: go.etcd.io/bbolt
@@ -84,6 +90,8 @@ linters:
         - empty
         - stdlib
         - github.com/libp2p/go-libp2p/core/crypto.PrivKey
+        - github.com/ipfs/go-datastore.Batch
+        - github.com/ipfs/go-datastore/query.Results
   exclusions:
     generated: lax
     presets:

@@ -151,6 +151,7 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 		dht.Mode(dht.ModeServer),
 		dht.ProtocolPrefix(protocol.ID(protocolPrefix)),
 		dht.DisableValues(),
+		dht.Datastore(newOrderedDatastore()),
 		dht.MaxRecordAge(KeyTTL),
 		dht.BootstrapPeersFunc(bootstrapFunc(ctx, bs, host)),
 		dht.EnableOptimisticProvide(),
