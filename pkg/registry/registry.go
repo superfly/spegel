@@ -113,6 +113,7 @@ type Registry struct {
 	log                   logr.Logger
 	bufferPool            *sync.Pool
 	ociClient             *oci.Client
+	pushStores            *pushBackend
 	username              string
 	password              string
 	addr                  string

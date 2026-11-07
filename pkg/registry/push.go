@@ -30,10 +30,32 @@ import (
 type PushConfig struct {
 	UpstreamHeaders map[string]string `arg:"--push-upstream-headers,env:PUSH_UPSTREAM_HEADERS" help:"HTTP header overrides for upstream push request."`
 	LeaseDuration   time.Duration     `arg:"--push-lease-duration,env:PUSH_LEASE_DURATION" default:"10m" help:"Temporary lease duration for pushed images."`
-	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"5m" help:"Upstream push request timeout."`
-	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"10" help:"Number of retries for upstream push requests."`
+	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"10m" help:"Total time allowed for pushing an image to the upstream registry, all attempts included, before its manifest upload fails."`
+	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"3" help:"Number of attempts for an upstream image push."`
 	Enabled         bool              `arg:"--push,env:PUSH" default:"false" help:"When true handles push endpoints by writing to the Containerd content and image store."`
-	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true asynchronously pushes uploaded images to the upstream registry."`
+	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true pushes uploaded images to the upstream registry before acknowledging their manifest upload."`
+}
+
+// pushBackend is the Containerd state the push endpoints write to.
+type pushBackend struct {
+	content content.Store
+	images  images.Store
+	leases  leases.Manager
+}
+
+func (r *Registry) getPushBackend() (pushBackend, error) {
+	if r.pushStores != nil {
+		return *r.pushStores, nil
+	}
+	cdc, err := r.getContainerdClient()
+	if err != nil {
+		return pushBackend{}, err
+	}
+	return pushBackend{
+		content: cdc.ContentStore(),
+		images:  cdc.ImageService(),
+		leases:  cdc.LeasesService(),
+	}, nil
 }
 
 // Add a temporary lease to newly created content and images.
@@ -41,17 +63,11 @@ func (r *Registry) withLease(ctx context.Context) (context.Context, error) {
 	if r.push.LeaseDuration == 0 {
 		return ctx, nil
 	}
-	cd, ok := r.ociStore.(*oci.Containerd)
-	if !ok {
-		return nil, errors.New("lease requires containerd store")
-	}
-	cdc, err := cd.Client()
+	backend, err := r.getPushBackend()
 	if err != nil {
 		return nil, err
 	}
-	lease := cdc.LeasesService()
-
-	l, err := lease.Create(ctx, leases.WithRandomID(), leases.WithExpiration(r.push.LeaseDuration))
+	l, err := backend.leases.Create(ctx, leases.WithRandomID(), leases.WithExpiration(r.push.LeaseDuration))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lease: %w", err)
 	}
@@ -64,12 +80,12 @@ func (r *Registry) createSessionLease(ctx context.Context, session string, dist 
 	if r.push.LeaseDuration == 0 {
 		return ctx, nil
 	}
-	cdc, err := r.getContainerdClient()
+	backend, err := r.getPushBackend()
 	if err != nil {
 		return nil, err
 	}
 	id := uploadLeaseID(session)
-	_, err = cdc.LeasesService().Create(ctx,
+	_, err = backend.leases.Create(ctx,
 		leases.WithID(id),
 		leases.WithExpiration(r.push.LeaseDuration),
 		leases.WithLabels(map[string]string{
@@ -96,7 +112,7 @@ func (r *Registry) deleteSessionLease(session string) {
 	if r.push.LeaseDuration == 0 {
 		return
 	}
-	cdc, err := r.getContainerdClient()
+	backend, err := r.getPushBackend()
 	if err != nil {
 		r.log.Error(err, "failed to get containerd client for lease delete")
 		return
@@ -104,7 +120,7 @@ func (r *Registry) deleteSessionLease(session string) {
 	// Use background context so cleanup runs when the request was cancelled.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := cdc.LeasesService().Delete(ctx, leases.Lease{ID: uploadLeaseID(session)}); err != nil && !errdefs.IsNotFound(err) {
+	if err := backend.leases.Delete(ctx, leases.Lease{ID: uploadLeaseID(session)}); err != nil && !errdefs.IsNotFound(err) {
 		r.log.Error(err, "failed to delete session lease", "session", session)
 	}
 }
@@ -159,12 +175,12 @@ func (r *Registry) pushHandler(rw httpx.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	cdc, err := r.getContainerdClient()
+	backend, err := r.getPushBackend()
 	if err != nil {
 		rw.WriteError(http.StatusMethodNotAllowed, oci.NewDistributionError(oci.ErrCodeUnsupported, err.Error(), nil))
 		return
 	}
-	cs := cdc.ContentStore()
+	cs := backend.content
 
 	if dist.Kind == oci.DistributionKindUpload {
 		if req.Method == http.MethodPost && dist.Session == "" {
@@ -192,7 +208,7 @@ func (r *Registry) pushHandler(rw httpx.ResponseWriter, req *http.Request) {
 	}
 
 	if dist.Kind == oci.DistributionKindManifest && req.Method == http.MethodPut {
-		r.handleManifestPut(rw, req, dist, cdc)
+		r.handleManifestPut(rw, req, dist, backend)
 		return
 	}
 
@@ -364,7 +380,7 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 	rw.WriteHeader(http.StatusNoContent)
 }
 
-func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, client *client.Client) {
+func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, backend pushBackend) {
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, err)
@@ -387,7 +403,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		return
 	}
 
-	cs := client.ContentStore()
+	cs := backend.content
 	w, err := cs.Writer(ctx, content.WithRef(dist.Reference()))
 	if err != nil && !errdefs.IsAlreadyExists(err) {
 		rw.WriteError(http.StatusInternalServerError, err)
@@ -411,7 +427,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	}
 	image := images.Image{Name: ref, Target: desc}
 
-	imageService := client.ImageService()
+	imageService := backend.images
 	_, err = imageService.Create(ctx, image)
 	if err != nil && errdefs.IsAlreadyExists(err) {
 		_, err = imageService.Update(ctx, image)
@@ -421,31 +437,46 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		return
 	}
 
-	dist.Digest = desc.Digest
-	created(rw, dist)
-
 	if err = images.Dispatch(ctx, images.SetChildrenLabels(cs, images.ChildrenHandler(cs)), nil, desc); err != nil {
-		r.log.Error(err, "failed to set image labels")
+		rw.WriteError(http.StatusInternalServerError, fmt.Errorf("failed to set image labels: %w", err))
 		return
 	}
+
+	// The upstream push completes before the manifest upload is acknowledged,
+	// so a client that resolves the reference from the upstream registry right
+	// after its push finds it there. A client that disconnects does not cancel
+	// the push: the upstream copy is still wanted, and a retried push finds the
+	// content already in place.
 	if r.push.Upstream {
 		pushHeaders := req.Header.Clone()
 		for k, v := range r.push.UpstreamHeaders {
 			pushHeaders.Set(k, v)
 		}
-		go r.pushUpstream(ref, desc, cs, pushHeaders)
+		if err := r.pushUpstream(context.WithoutCancel(ctx), ref, desc, cs, pushHeaders); err != nil {
+			rw.WriteError(http.StatusBadGateway, oci.NewDistributionError(oci.ErrCodeUnknown, "failed to push image to upstream registry", err.Error()))
+			return
+		}
 	}
+
+	dist.Digest = desc.Digest
+	created(rw, dist)
 }
 
-func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) {
-	log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
+// pushUpstream copies the image tree under desc to the upstream registry,
+// fetching any content that is missing locally from this registry or from
+// upstream first. All attempts share the UpstreamTimeout budget.
+func (r *Registry) pushUpstream(ctx context.Context, ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) error {
+	log := r.log.WithName("upstreamPush").WithValues("ref", ref, "desc", desc)
 	log.Info("Starting upstream image push")
-	ctx := context.Background()
+	start := time.Now()
 
-	err := retryWithBackoff(r.push.UpstreamRetries, func() error {
-		ctx, cancel := context.WithTimeout(ctx, r.push.UpstreamTimeout)
+	if r.push.UpstreamTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.push.UpstreamTimeout)
 		defer cancel()
+	}
 
+	err := retryWithBackoff(ctx, r.push.UpstreamRetries, func() error {
 		rOpts := docker.ResolverOptions{Hosts: r.registryHosts, Headers: pushHeaders}
 		fetcher, err := docker.NewResolver(rOpts).Fetcher(ctx, ref)
 		if err != nil {
@@ -463,26 +494,33 @@ func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.
 		if err = remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil); err != nil {
 			return fmt.Errorf("failed to push image upstream: %w", err)
 		}
-
 		return nil
 	}, log)
-
 	if err != nil {
-		log.Error(err, "Failed to push upstream image")
-	} else {
-		log.Info("Finished upstream image push")
+		log.Error(err, "Failed to push upstream image", "duration", time.Since(start))
+		return err
 	}
+	log.Info("Finished upstream image push", "duration", time.Since(start))
+	return nil
 }
 
-// Simple exponential backoff with 2^n second delay between attempts.
-func retryWithBackoff(attempts int, fn func() error, log logr.Logger) error {
+// retryWithBackoff calls fn up to attempts times, sleeping 2^n seconds between
+// attempts, and gives up early once ctx is done.
+func retryWithBackoff(ctx context.Context, attempts int, fn func() error, log logr.Logger) error {
+	attempts = max(attempts, 1)
 	var err error
-	for i := 0; i < attempts; i++ {
+	for i := range attempts {
 		if err = fn(); err == nil {
 			return nil
-		} else if i < attempts-1 {
-			log.Error(err, "attempt failed", "attempt", i+1)
-			time.Sleep(time.Duration(1<<uint(i)) * time.Second)
+		}
+		if i == attempts-1 {
+			break
+		}
+		log.Error(err, "attempt failed", "attempt", i+1)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gave up after %d attempts: %w", i+1, errors.Join(err, context.Cause(ctx)))
+		case <-time.After(time.Duration(1<<uint(i)) * time.Second):
 		}
 	}
 	return fmt.Errorf("failed after %d attempts: %w", attempts, err)

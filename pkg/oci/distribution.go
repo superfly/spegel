@@ -147,6 +147,7 @@ const (
 	ErrCodeDenied              DistributionErrorCode = "DENIED"
 	ErrCodeUnsupported         DistributionErrorCode = "UNSUPPORTED"
 	ErrCodeTooManyRequests     DistributionErrorCode = "TOOMANYREQUESTS"
+	ErrCodeUnknown             DistributionErrorCode = "UNKNOWN"
 )
 
 type DistributionError struct {
