@@ -163,6 +163,8 @@ func newPushRegistry(t *testing.T, cfg PushConfig) (*Registry, context.Context) 
 		images:  metadata.NewImageStore(db),
 		leases:  metadata.NewLeaseManager(db),
 	}
+	// Runs before the metadata store closes.
+	t.Cleanup(reg.pushes.Wait)
 	return reg, ctx
 }
 
@@ -203,6 +205,23 @@ func testManifest(t *testing.T, ctx context.Context, h http.Handler, upstream, l
 	return b
 }
 
+func (f *fakeUpstream) hasBlob(dgst digest.Digest) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.blobs[dgst]
+	return ok
+}
+
+func (f *fakeUpstream) uploadCounts() map[digest.Digest]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := map[digest.Digest]int{}
+	for k, v := range f.blobUploads {
+		counts[k] = v
+	}
+	return counts
+}
+
 func TestManifestPutWaitsForUpstreamPush(t *testing.T) {
 	t.Parallel()
 
@@ -212,7 +231,7 @@ func TestManifestPutWaitsForUpstreamPush(t *testing.T) {
 	t.Cleanup(upstreamSrv.Close)
 	upstreamHost := upstreamSrv.Listener.Addr().String()
 
-	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute, LeaseDuration: time.Minute})
+	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamWait: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute, LeaseDuration: time.Minute})
 	h := reg.Handler()
 
 	manifest := testManifest(t, ctx, h, upstreamHost, "layer")
@@ -239,7 +258,68 @@ func TestManifestPutWaitsForUpstreamPush(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	require.Equal(t, digest.FromBytes(manifest).String(), resp.Header.Get("Docker-Content-Digest"))
 	require.True(t, upstream.hasManifest("latest"))
-	require.Len(t, upstream.blobs, 2)
+	counts := upstream.uploadCounts()
+	require.Len(t, counts, 2)
+	for dgst, n := range counts {
+		require.Equal(t, 1, n, "blob %s uploaded more than once", dgst)
+	}
+}
+
+func TestManifestPutAcksBeforeUpstreamPushByDefault(t *testing.T) {
+	t.Parallel()
+
+	upstream := newFakeUpstream()
+	upstream.hold = make(chan struct{})
+	upstreamSrv := httptest.NewServer(upstream)
+	t.Cleanup(upstreamSrv.Close)
+	upstreamHost := upstreamSrv.Listener.Addr().String()
+
+	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute, LeaseDuration: time.Minute})
+	h := reg.Handler()
+
+	manifest := testManifest(t, ctx, h, upstreamHost, "layer")
+	resp := doRequest(ctx, h, http.MethodPut, "http://localhost/v2/foo/bar/manifests/latest?ns="+upstreamHost, ocispec.MediaTypeImageManifest, manifest)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	select {
+	case ref := <-upstream.manifestPuts:
+		require.Equal(t, "latest", ref)
+	case <-time.After(10 * time.Second):
+		t.Fatal("upstream never received the manifest")
+	}
+	close(upstream.hold)
+	reg.pushes.Wait()
+	require.True(t, upstream.hasManifest("latest"))
+}
+
+func TestBlobUploadPushesUpstreamBeforeManifest(t *testing.T) {
+	t.Parallel()
+
+	upstream := newFakeUpstream()
+	upstreamSrv := httptest.NewServer(upstream)
+	t.Cleanup(upstreamSrv.Close)
+	upstreamHost := upstreamSrv.Listener.Addr().String()
+
+	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamWait: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute, LeaseDuration: time.Minute})
+	h := reg.Handler()
+
+	// Monolithic upload.
+	mono := pushBlob(t, ctx, h, upstreamHost, []byte("monolithic layer"))
+
+	// Chunked upload: start a session, send a chunk, commit with the digest.
+	chunked := []byte("chunked layer")
+	resp := doRequest(ctx, h, http.MethodPost, "http://localhost/v2/foo/bar/blobs/uploads/?ns="+url.QueryEscape(upstreamHost), "", nil)
+	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+	location := resp.Header.Get("Location")
+	resp = doRequest(ctx, h, http.MethodPatch, "http://localhost"+location+"?ns="+url.QueryEscape(upstreamHost), "application/octet-stream", chunked)
+	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+	chunkedDgst := digest.FromBytes(chunked)
+	resp = doRequest(ctx, h, http.MethodPut, "http://localhost"+location+"?digest="+chunkedDgst.String()+"&ns="+url.QueryEscape(upstreamHost), "", nil)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	reg.pushes.Wait()
+	require.True(t, upstream.hasBlob(mono.Digest))
+	require.True(t, upstream.hasBlob(chunkedDgst))
 }
 
 func TestManifestPutFailsWhenUpstreamPushFails(t *testing.T) {
@@ -251,7 +331,7 @@ func TestManifestPutFailsWhenUpstreamPushFails(t *testing.T) {
 	t.Cleanup(upstreamSrv.Close)
 	upstreamHost := upstreamSrv.Listener.Addr().String()
 
-	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute})
+	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamWait: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute})
 	h := reg.Handler()
 
 	manifest := testManifest(t, ctx, h, upstreamHost, "layer")
@@ -282,7 +362,7 @@ func TestMultiArchPushUploadsEachBlobOnce(t *testing.T) {
 	t.Cleanup(upstreamSrv.Close)
 	upstreamHost := upstreamSrv.Listener.Addr().String()
 
-	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute})
+	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamWait: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute})
 	h := reg.Handler()
 
 	// Clients push each platform manifest by digest, then the index by tag.
@@ -302,8 +382,9 @@ func TestMultiArchPushUploadsEachBlobOnce(t *testing.T) {
 	require.True(t, upstream.hasManifest("latest"))
 
 	// The shared config blob and the two layers.
-	require.Len(t, upstream.blobUploads, 3)
-	for dgst, n := range upstream.blobUploads {
+	counts := upstream.uploadCounts()
+	require.Len(t, counts, 3)
+	for dgst, n := range counts {
 		require.Equal(t, 1, n, "blob %s uploaded more than once", dgst)
 	}
 }

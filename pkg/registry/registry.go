@@ -114,12 +114,14 @@ type Registry struct {
 	bufferPool            *sync.Pool
 	ociClient             *oci.Client
 	pushStores            *pushBackend
+	blobPushes            blobPushTracker
 	username              string
 	password              string
 	addr                  string
 	push                  PushConfig
 	resolveTimeout        time.Duration
 	resolveRetries        int
+	pushes                sync.WaitGroup
 	resolveLatestTag      bool
 	disableLatestTagCache bool
 }

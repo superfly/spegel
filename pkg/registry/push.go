@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
@@ -30,10 +31,11 @@ import (
 type PushConfig struct {
 	UpstreamHeaders map[string]string `arg:"--push-upstream-headers,env:PUSH_UPSTREAM_HEADERS" help:"HTTP header overrides for upstream push request."`
 	LeaseDuration   time.Duration     `arg:"--push-lease-duration,env:PUSH_LEASE_DURATION" default:"10m" help:"Temporary lease duration for pushed images."`
-	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"10m" help:"Total time allowed for pushing an image to the upstream registry, all attempts included, before its manifest upload fails."`
-	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"3" help:"Number of attempts for an upstream image push."`
+	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"15m" help:"Total time allowed for pushing an image to the upstream registry, all attempts included. With --push-upstream-wait, keep it below the response timeout of any proxy in front of Spegel."`
+	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"10" help:"Number of attempts for an upstream image push."`
 	Enabled         bool              `arg:"--push,env:PUSH" default:"false" help:"When true handles push endpoints by writing to the Containerd content and image store."`
-	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true pushes uploaded images to the upstream registry before acknowledging their manifest upload."`
+	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true pushes uploaded blobs and images to the upstream registry."`
+	UpstreamWait    bool              `arg:"--push-upstream-wait,env:PUSH_UPSTREAM_WAIT" default:"false" help:"When true acknowledges a manifest upload only once its image is in the upstream registry, and fails the upload when the upstream push fails."`
 }
 
 // pushBackend is the Containerd state the push endpoints write to.
@@ -259,6 +261,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 	}
 	success = true
 	r.advertise(dist.Digest)
+	r.pushBlobUpstream(ctx, req, dist, cs, n)
 
 	created(rw, dist)
 }
@@ -361,6 +364,7 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 	}
 	success = true
 	r.advertise(dist.Digest)
+	r.pushBlobUpstream(ctx, req, dist, cs, status.Offset)
 
 	dist.Kind = oci.DistributionKindBlob
 	created(rw, dist)
@@ -442,17 +446,22 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		return
 	}
 
-	// The upstream push completes before the manifest upload is acknowledged,
-	// so a client that resolves the reference from the upstream registry right
-	// after its push finds it there. A client that disconnects does not cancel
-	// the push: the upstream copy is still wanted, and a retried push finds the
-	// content already in place.
 	if r.push.Upstream {
-		pushHeaders := req.Header.Clone()
-		for k, v := range r.push.UpstreamHeaders {
-			pushHeaders.Set(k, v)
-		}
-		if err := r.pushUpstream(context.WithoutCancel(ctx), ref, desc, cs, pushHeaders); err != nil {
+		pushHeaders := upstreamHeaders(req, r.push.UpstreamHeaders)
+		repo := dist.Registry + "/" + dist.Name
+		// A client that disconnects does not cancel the push: the upstream copy is
+		// still wanted, and a retried push finds the content already in place.
+		pushCtx := context.WithoutCancel(ctx)
+		if !r.push.UpstreamWait {
+			r.pushes.Add(1)
+			go func() {
+				defer r.pushes.Done()
+				//nolint:errcheck // pushUpstream logs its own failure.
+				r.pushUpstream(pushCtx, repo, ref, desc, cs, pushHeaders)
+			}()
+		} else if err := r.pushUpstream(pushCtx, repo, ref, desc, cs, pushHeaders); err != nil {
+			// The client resolves the reference from the upstream registry once its
+			// push succeeds, so the upload only succeeds once the image is there.
 			rw.WriteError(http.StatusBadGateway, oci.NewDistributionError(oci.ErrCodeUnknown, "failed to push image to upstream registry", err.Error()))
 			return
 		}
@@ -462,10 +471,105 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	created(rw, dist)
 }
 
+func upstreamHeaders(req *http.Request, overrides map[string]string) http.Header {
+	h := req.Header.Clone()
+	for k, v := range overrides {
+		h.Set(k, v)
+	}
+	return h
+}
+
+// pushBlobUpstream starts copying a blob to the upstream registry as soon as
+// its upload completes, so the upstream push overlaps the client's own push
+// and little is left to upload when the manifest arrives. It makes a single
+// attempt: the manifest push uploads whatever is still missing.
+func (r *Registry) pushBlobUpstream(ctx context.Context, req *http.Request, dist oci.DistributionPath, cs content.Store, size int64) {
+	if !r.push.Upstream {
+		return
+	}
+	repo := dist.Registry + "/" + dist.Name
+	ref := repo + "@" + dist.Digest.String()
+	desc := ocispec.Descriptor{MediaType: "application/octet-stream", Digest: dist.Digest, Size: size}
+	headers := upstreamHeaders(req, r.push.UpstreamHeaders)
+	done := r.blobPushes.start(repo)
+	ctx = context.WithoutCancel(ctx)
+	r.pushes.Add(1)
+	go func() {
+		defer r.pushes.Done()
+		defer done()
+		if r.push.UpstreamTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, r.push.UpstreamTimeout)
+			defer cancel()
+		}
+		log := r.log.WithName("upstreamPush").WithValues("ref", ref)
+		start := time.Now()
+		pusher, err := docker.NewResolver(docker.ResolverOptions{Headers: headers}).Pusher(ctx, ref)
+		if err == nil {
+			err = remotes.PushContent(ctx, pusher, desc, cs, nil, nil, nil)
+		}
+		if err != nil {
+			log.Error(err, "Failed to push blob upstream", "duration", time.Since(start))
+			return
+		}
+		log.V(4).Info("Pushed blob upstream", "duration", time.Since(start))
+	}()
+}
+
+// blobPushTracker counts the blob pushes in flight per repository, so an
+// image push can wait for them rather than upload the same blobs again.
+type blobPushTracker struct {
+	repos map[string]*blobPushes
+	mu    sync.Mutex
+}
+
+type blobPushes struct {
+	done chan struct{}
+	n    int
+}
+
+func (t *blobPushTracker) start(repo string) func() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.repos == nil {
+		t.repos = map[string]*blobPushes{}
+	}
+	p, ok := t.repos[repo]
+	if !ok {
+		p = &blobPushes{done: make(chan struct{})}
+		t.repos[repo] = p
+	}
+	p.n++
+	return func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		p.n--
+		if p.n == 0 {
+			close(p.done)
+			delete(t.repos, repo)
+		}
+	}
+}
+
+// wait returns once no blob push to repo is in flight, or ctx is done.
+func (t *blobPushTracker) wait(ctx context.Context, repo string) {
+	t.mu.Lock()
+	p, ok := t.repos[repo]
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case <-p.done:
+	case <-ctx.Done():
+	}
+}
+
 // pushUpstream copies the image tree under desc to the upstream registry,
 // fetching any content that is missing locally from this registry or from
-// upstream first. All attempts share the UpstreamTimeout budget.
-func (r *Registry) pushUpstream(ctx context.Context, ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) error {
+// upstream first. It waits for the repository's blob pushes in flight, and
+// all attempts share the UpstreamTimeout budget.
+func (r *Registry) pushUpstream(ctx context.Context, repo, ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) error {
 	log := r.log.WithName("upstreamPush").WithValues("ref", ref, "desc", desc)
 	log.Info("Starting upstream image push")
 	start := time.Now()
@@ -475,6 +579,7 @@ func (r *Registry) pushUpstream(ctx context.Context, ref string, desc ocispec.De
 		ctx, cancel = context.WithTimeout(ctx, r.push.UpstreamTimeout)
 		defer cancel()
 	}
+	r.blobPushes.wait(ctx, repo)
 
 	err := retryWithBackoff(ctx, r.push.UpstreamRetries, func() error {
 		rOpts := docker.ResolverOptions{Hosts: r.registryHosts, Headers: pushHeaders}
