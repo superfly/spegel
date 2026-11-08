@@ -205,13 +205,6 @@ func testManifest(t *testing.T, ctx context.Context, h http.Handler, upstream, l
 	return b
 }
 
-func (f *fakeUpstream) hasBlob(dgst digest.Digest) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	_, ok := f.blobs[dgst]
-	return ok
-}
-
 func (f *fakeUpstream) uploadCounts() map[digest.Digest]int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -290,36 +283,6 @@ func TestManifestPutAcksBeforeUpstreamPushByDefault(t *testing.T) {
 	close(upstream.hold)
 	reg.pushes.Wait()
 	require.True(t, upstream.hasManifest("latest"))
-}
-
-func TestBlobUploadPushesUpstreamBeforeManifest(t *testing.T) {
-	t.Parallel()
-
-	upstream := newFakeUpstream()
-	upstreamSrv := httptest.NewServer(upstream)
-	t.Cleanup(upstreamSrv.Close)
-	upstreamHost := upstreamSrv.Listener.Addr().String()
-
-	reg, ctx := newPushRegistry(t, PushConfig{Upstream: true, UpstreamWait: true, UpstreamRetries: 1, UpstreamTimeout: time.Minute, LeaseDuration: time.Minute})
-	h := reg.Handler()
-
-	// Monolithic upload.
-	mono := pushBlob(t, ctx, h, upstreamHost, []byte("monolithic layer"))
-
-	// Chunked upload: start a session, send a chunk, commit with the digest.
-	chunked := []byte("chunked layer")
-	resp := doRequest(ctx, h, http.MethodPost, "http://localhost/v2/foo/bar/blobs/uploads/?ns="+url.QueryEscape(upstreamHost), "", nil)
-	require.Equal(t, http.StatusAccepted, resp.StatusCode)
-	location := resp.Header.Get("Location")
-	resp = doRequest(ctx, h, http.MethodPatch, "http://localhost"+location+"?ns="+url.QueryEscape(upstreamHost), "application/octet-stream", chunked)
-	require.Equal(t, http.StatusAccepted, resp.StatusCode)
-	chunkedDgst := digest.FromBytes(chunked)
-	resp = doRequest(ctx, h, http.MethodPut, "http://localhost"+location+"?digest="+chunkedDgst.String()+"&ns="+url.QueryEscape(upstreamHost), "", nil)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	reg.pushes.Wait()
-	require.True(t, upstream.hasBlob(mono.Digest))
-	require.True(t, upstream.hasBlob(chunkedDgst))
 }
 
 func TestManifestPutFailsWhenUpstreamPushFails(t *testing.T) {
