@@ -205,6 +205,9 @@ func registryCommand(ctx context.Context, args *RegistryCmd) (err error) {
 		}
 		return nil
 	})
+	if err := reg.ResumeUpstreamPushes(ctx); err != nil {
+		log.Error(err, "failed to resume pending upstream pushes")
+	}
 	g.Go(func() error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
