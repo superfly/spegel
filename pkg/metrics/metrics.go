@@ -41,6 +41,23 @@ var (
 		Name: "spegel_advertised_keys",
 		Help: "Number of keys advertised to be available.",
 	}, []string{"registry"})
+	UpstreamPushTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "spegel_upstream_push_total",
+		Help: "Total number of pushed images forwarded to the upstream registry, by final result after retries.",
+	}, []string{"result"})
+	UpstreamPushDurHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "spegel_upstream_push_duration_seconds",
+		Help:    "The duration of forwarding a pushed image to the upstream registry, including retries.",
+		Buckets: prometheus.ExponentialBuckets(1, 2, 12),
+	}, []string{"result"})
+	UpstreamPushInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spegel_upstream_push_in_flight",
+		Help: "Number of pushed images currently being forwarded to the upstream registry.",
+	})
+	UpstreamPushResumedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "spegel_upstream_push_resumed_total",
+		Help: "Total number of upstream pushes found unfinished at startup and resumed.",
+	})
 )
 
 func Register() {
@@ -50,5 +67,9 @@ func Register() {
 	DefaultRegisterer.MustRegister(AdvertisedImageTags)
 	DefaultRegisterer.MustRegister(AdvertisedImageDigests)
 	DefaultRegisterer.MustRegister(AdvertisedKeys)
+	DefaultRegisterer.MustRegister(UpstreamPushTotal)
+	DefaultRegisterer.MustRegister(UpstreamPushDurHistogram)
+	DefaultRegisterer.MustRegister(UpstreamPushInFlight)
+	DefaultRegisterer.MustRegister(UpstreamPushResumedTotal)
 	httpx.RegisterMetrics(DefaultRegisterer)
 }
