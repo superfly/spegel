@@ -192,3 +192,5 @@ require (
 )
 
 tool github.com/norwoodj/helm-docs/cmd/helm-docs
+
+replace github.com/libp2p/go-netroute => github.com/superfly/go-netroute v0.4.1-0.20261109210328-3b90c9d542c9
