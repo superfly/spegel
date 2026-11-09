@@ -24,6 +24,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/spegel-org/spegel/pkg/httpx"
+	"github.com/spegel-org/spegel/pkg/metrics"
 	"github.com/spegel-org/spegel/pkg/oci"
 )
 
@@ -410,6 +411,11 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		ref = fmt.Sprintf("%s/%s@%s", dist.Registry, dist.Name, desc.Digest)
 	}
 	image := images.Image{Name: ref, Target: desc}
+	if r.push.Upstream {
+		// Recorded before the response so a restart before the upstream push
+		// completes leaves a marker that ResumeUpstreamPushes picks up.
+		image.Labels = map[string]string{pendingUpstreamPushLabel: desc.Digest.String()}
+	}
 
 	imageService := client.ImageService()
 	_, err = imageService.Create(ctx, image)
@@ -437,10 +443,47 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	}
 }
 
+// pendingUpstreamPushLabel marks an image whose upstream push has not finished.
+// Its value is the digest the push was started for, so a later push of the same
+// tag is not cleared by an earlier one finishing.
+const pendingUpstreamPushLabel = "spegel.org/upstream-push-pending"
+
+// ResumeUpstreamPushes restarts upstream pushes that were still pending when
+// the process last stopped. Headers from the original push request are not
+// persisted, so resumed pushes carry only the configured upstream headers.
+func (r *Registry) ResumeUpstreamPushes(ctx context.Context) error {
+	if !r.push.Enabled || !r.push.Upstream {
+		return nil
+	}
+	cdc, err := r.getContainerdClient()
+	if err != nil {
+		return err
+	}
+	imgs, err := cdc.ImageService().List(ctx, fmt.Sprintf("labels.%q", pendingUpstreamPushLabel))
+	if err != nil {
+		return fmt.Errorf("failed to list images pending upstream push: %w", err)
+	}
+	pushHeaders := http.Header{}
+	for k, v := range r.push.UpstreamHeaders {
+		pushHeaders.Set(k, v)
+	}
+	cs := cdc.ContentStore()
+	for _, img := range imgs {
+		r.log.Info("Resuming upstream image push", "ref", img.Name, "digest", img.Target.Digest)
+		metrics.UpstreamPushResumedTotal.Inc()
+		go r.pushUpstream(img.Name, img.Target, cs, pushHeaders)
+	}
+	return nil
+}
+
 func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.Store, pushHeaders http.Header) {
 	log := r.log.WithName("backgroundPush").WithValues("ref", ref, "desc", desc)
 	log.Info("Starting upstream image push")
 	ctx := context.Background()
+
+	metrics.UpstreamPushInFlight.Inc()
+	defer metrics.UpstreamPushInFlight.Dec()
+	start := time.Now()
 
 	err := retryWithBackoff(r.push.UpstreamRetries, func() error {
 		ctx, cancel := context.WithTimeout(ctx, r.push.UpstreamTimeout)
@@ -467,11 +510,50 @@ func (r *Registry) pushUpstream(ref string, desc ocispec.Descriptor, cs content.
 		return nil
 	}, log)
 
+	result := "success"
 	if err != nil {
+		result = "failure"
 		log.Error(err, "Failed to push upstream image")
 	} else {
 		log.Info("Finished upstream image push")
 	}
+	metrics.UpstreamPushTotal.WithLabelValues(result).Inc()
+	metrics.UpstreamPushDurHistogram.WithLabelValues(result).Observe(time.Since(start).Seconds())
+
+	// A push that ran to completion, successfully or not, is no longer
+	// pending. Failures are reported through the log and metrics above rather
+	// than retried on every restart.
+	if err := r.clearPendingUpstreamPush(ctx, ref, desc.Digest); err != nil {
+		log.Error(err, "failed to clear pending upstream push label")
+	}
+}
+
+// clearPendingUpstreamPush removes the pending label from ref, unless the label
+// now records a different digest because the tag was pushed again meanwhile.
+func (r *Registry) clearPendingUpstreamPush(ctx context.Context, ref string, dgst digest.Digest) error {
+	cdc, err := r.getContainerdClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	is := cdc.ImageService()
+	img, err := is.Get(ctx, ref)
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if img.Labels[pendingUpstreamPushLabel] != dgst.String() {
+		return nil
+	}
+	delete(img.Labels, pendingUpstreamPushLabel)
+	_, err = is.Update(ctx, img, "labels."+pendingUpstreamPushLabel)
+	if errdefs.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 // Simple exponential backoff with 2^n second delay between attempts.
