@@ -4,10 +4,6 @@ go 1.24.0
 
 toolchain go1.24.3
 
-replace github.com/libp2p/go-netroute => github.com/wjordan/go-netroute v0.0.0-20250729210043-0e6494532775
-
-replace github.com/libp2p/go-libp2p => github.com/wjordan/go-libp2p v0.0.0-20250731193741-38acbafd8a34
-
 require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20250530080122-d0efc28a5723
 	github.com/alexflint/go-arg v1.6.0
@@ -97,7 +93,7 @@ require (
 	github.com/libp2p/go-libp2p-record v0.3.1 // indirect
 	github.com/libp2p/go-libp2p-routing-helpers v0.7.5 // indirect
 	github.com/libp2p/go-msgio v0.3.0 // indirect
-	github.com/libp2p/go-netroute v0.2.2 // indirect
+	github.com/libp2p/go-netroute v0.4.0 // indirect
 	github.com/libp2p/go-reuseport v0.4.0 // indirect
 	github.com/libp2p/go-yamux/v5 v5.0.1 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
@@ -166,7 +162,6 @@ require (
 	github.com/spf13/viper v1.16.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
-	github.com/wjordan/netinterfaces v0.1.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
@@ -197,3 +192,5 @@ require (
 )
 
 tool github.com/norwoodj/helm-docs/cmd/helm-docs
+
+replace github.com/libp2p/go-netroute => github.com/superfly/go-netroute v0.4.1-0.20261109211846-b1427b99127b
