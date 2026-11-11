@@ -71,6 +71,36 @@ func TestP2PRouter(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestP2PRouterDialsFromEphemeralPort(t *testing.T) {
+	t.Parallel()
+
+	bs := NewStaticBootstrapper(nil)
+	a, err := NewP2PRouter(t.Context(), "localhost:0", bs, "9090", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { a.host.Close() })
+	b, err := NewP2PRouter(t.Context(), "localhost:0", bs, "9090", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { b.host.Close() })
+
+	err = a.host.Connect(t.Context(), *host.InfoFromHost(b.host))
+	require.NoError(t, err)
+	conns := a.host.Network().ConnsToPeer(b.host.ID())
+	require.NotEmpty(t, conns)
+
+	listenPorts := map[string]bool{}
+	for _, addr := range a.host.Network().ListenAddresses() {
+		// Skip listeners without a TCP port, such as the circuit relay.
+		if port, err := addr.ValueForProtocol(ma.P_TCP); err == nil {
+			listenPorts[port] = true
+		}
+	}
+	for _, conn := range conns {
+		port, err := conn.LocalMultiaddr().ValueForProtocol(ma.P_TCP)
+		require.NoError(t, err)
+		require.False(t, listenPorts[port], "outbound connection uses listen port %s", port)
+	}
+}
+
 func TestReady(t *testing.T) {
 	t.Parallel()
 
