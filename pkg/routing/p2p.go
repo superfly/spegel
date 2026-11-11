@@ -26,6 +26,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/sec"
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 	mc "github.com/multiformats/go-multicodec"
@@ -118,6 +119,12 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 	})
 	libp2pOpts := []libp2p.Option{
 		libp2p.ListenAddrs(multiAddrs...),
+		// Dial peers from an ephemeral port. With reuseport, a host listening on
+		// a specific IP looks up the kernel route to every peer it dials, to
+		// decide whether to dial from the listen port. That costs a netlink
+		// round trip per connection, and nothing here needs the listen port as
+		// the source: peers learn the address to dial back from AddrsFactory.
+		libp2p.Transport(tcp.NewTCPTransport, tcp.DisableReuseport()),
 		libp2p.PrometheusRegisterer(metrics.DefaultRegisterer),
 		addrFactoryOpt,
 	}
