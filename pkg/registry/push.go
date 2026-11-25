@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -26,11 +28,31 @@ import (
 
 type PushConfig struct {
 	UpstreamHeaders map[string]string `arg:"--push-upstream-headers,env:PUSH_UPSTREAM_HEADERS" help:"HTTP header overrides for upstream push request."`
+	UpstreamMode    string            `arg:"--push-upstream-mode,env:PUSH_UPSTREAM_MODE" default:"async" help:"Upstream push mode (async or sync)."`
 	LeaseDuration   time.Duration     `arg:"--push-lease-duration,env:PUSH_LEASE_DURATION" default:"10m" help:"Temporary lease duration for pushed images."`
 	UpstreamTimeout time.Duration     `arg:"--push-upstream-timeout,env:PUSH_UPSTREAM_TIMEOUT" default:"5m" help:"Upstream push request timeout."`
+	SyncTimeout     time.Duration     `arg:"--push-upstream-sync-timeout,env:PUSH_UPSTREAM_SYNC_TIMEOUT" default:"590s" help:"Total deadline for each synchronous upload commit or upstream digest check."`
 	UpstreamRetries int               `arg:"--push-upstream-retries,env:PUSH_UPSTREAM_RETRIES" default:"10" help:"Number of retries for upstream push requests."`
 	Enabled         bool              `arg:"--push,env:PUSH" default:"false" help:"When true handles push endpoints by writing to the Containerd content and image store."`
-	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true asynchronously pushes uploaded images to the upstream registry."`
+	Upstream        bool              `arg:"--push-upstream,env:PUSH_UPSTREAM" default:"false" help:"When true pushes uploaded images to the upstream registry."`
+}
+
+type upstreamPushMode string
+
+const (
+	upstreamPushDisabled upstreamPushMode = "disabled"
+	upstreamPushAsync    upstreamPushMode = "async"
+	upstreamPushSync     upstreamPushMode = "sync"
+)
+
+func (c PushConfig) mode() upstreamPushMode {
+	if !c.Enabled || !c.Upstream {
+		return upstreamPushDisabled
+	}
+	if upstreamPushMode(c.UpstreamMode) == upstreamPushSync {
+		return upstreamPushSync
+	}
+	return upstreamPushAsync
 }
 
 // Add a temporary lease to newly created content and images.
@@ -119,7 +141,11 @@ func withSource(dist oci.DistributionPath) content.Opt {
 }
 
 func uploadStatus(rw httpx.ResponseWriter, dist oci.DistributionPath, offset int64) {
-	rw.Header().Set("Location", "/v2/"+dist.Name+"/blobs/uploads/"+dist.Session)
+	location := url.URL{Path: "/v2/" + dist.Name + "/blobs/uploads/" + dist.Session}
+	if dist.Registry != "" {
+		location.RawQuery = url.Values{"ns": {dist.Registry}}.Encode()
+	}
+	rw.Header().Set("Location", location.String())
 	rw.Header().Set("Docker-Upload-UUID", dist.Session)
 	rw.Header().Set("Range", "0-"+strconv.FormatInt(max(0, offset-1), 10))
 	rw.Header().Set(httpx.HeaderContentLength, "0")
@@ -205,6 +231,9 @@ func (r *Registry) getContainerdClient() (*client.Client, error) {
 }
 
 func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
+	req, done := r.pushRequest(rw, req, "blob_commit")
+	defer done()
+
 	if err := dist.Digest.Validate(); err != nil {
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "invalid digest", err.Error()))
 		return
@@ -212,7 +241,7 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 	session := uuid.NewString()
 	ctx, err := r.createSessionLease(req.Context(), session, dist)
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	success := false
@@ -224,24 +253,22 @@ func (r *Registry) handleBlobUploadMonolithic(rw httpx.ResponseWriter, req *http
 
 	w, err := cs.Writer(ctx, content.WithRef(uploadRef(session)))
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	defer w.Close()
 
 	n, err := io.Copy(w, req.Body)
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	if err = w.Commit(ctx, n, dist.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	success = true
-	r.advertise(dist.Digest)
-
-	created(rw, dist)
+	r.finishBlobUpload(rw, req, dist, cs, true)
 }
 
 func (r *Registry) handleBlobUploadStart(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
@@ -292,27 +319,36 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 }
 
 func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
+	req, done := r.pushRequest(rw, req, "blob_commit")
+	defer done()
+
 	if err := dist.Digest.Validate(); err != nil {
 		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "invalid digest", err.Error()))
 		return
 	}
 	ctx := r.withSessionLease(req.Context(), dist.Session)
-	success := false
+	keepLease := false
 	defer func() {
-		if !success {
+		if !keepLease {
 			r.deleteSessionLease(dist.Session)
 		}
 	}()
 
 	desc := ocispec.Descriptor{Digest: dist.Digest}
-	w, err := cs.Writer(ctx, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
+	w, err := content.OpenWriter(ctx, cs, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
+	if err != nil && ctx.Err() != nil {
+		// A canceled wait did not acquire the writer. Keep the session lease
+		// in case a concurrent request is still using it.
+		keepLease = true
+		r.writePushError(rw, ctx.Err())
+		return
+	}
 	if errdefs.IsAlreadyExists(err) {
 		// Another concurrent upload may have already provided this content digest.
 		// containerd has attached the existing blob to our session lease, so keep
 		// the lease alive.
-		success = true
-		dist.Kind = oci.DistributionKindBlob
-		created(rw, dist)
+		keepLease = true
+		r.finishBlobUpload(rw, req, dist, cs, false)
 		return
 	}
 	if errdefs.IsNotFound(err) {
@@ -320,31 +356,28 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 		return
 	}
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	defer w.Close()
 
 	// final chunk
 	if _, err = io.Copy(w, req.Body); err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	status, err := w.Status()
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 
 	if err = w.Commit(ctx, status.Offset, dist.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
-	success = true
-	r.advertise(dist.Digest)
-
-	dist.Kind = oci.DistributionKindBlob
-	created(rw, dist)
+	keepLease = true
+	r.finishBlobUpload(rw, req, dist, cs, true)
 }
 
 func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
@@ -362,9 +395,12 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 }
 
 func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, client *client.Client) {
+	req, done := r.pushRequest(rw, req, "manifest_put")
+	defer done()
+
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 	mediaType := req.Header.Get(httpx.HeaderContentType)
@@ -375,31 +411,27 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 			return
 		}
 	}
-	size := int64(len(body))
-	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(body), Size: size}
+	mediaType, _, err = mime.ParseMediaType(mediaType)
+	if err != nil || (!images.IsManifestType(mediaType) && !images.IsIndexType(mediaType)) {
+		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeManifestInvalid, "unsupported manifest media type", nil))
+		return
+	}
+	desc := ocispec.Descriptor{MediaType: mediaType, Digest: digest.FromBytes(body), Size: int64(len(body))}
+	if dist.Digest != "" && dist.Digest != desc.Digest {
+		rw.WriteError(http.StatusBadRequest, oci.NewDistributionError(oci.ErrCodeDigestInvalid, "manifest does not match requested digest", nil))
+		return
+	}
 
 	ctx, err := r.withLease(req.Context())
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 
 	cs := client.ContentStore()
-	w, err := cs.Writer(ctx, content.WithRef(dist.Reference()))
-	if err != nil && !errdefs.IsAlreadyExists(err) {
-		rw.WriteError(http.StatusInternalServerError, err)
+	if err := content.WriteBlob(ctx, cs, dist.Reference(), bytes.NewReader(body), desc, withSource(dist)); err != nil {
+		r.writePushError(rw, err)
 		return
-	}
-	if err == nil {
-		defer w.Close()
-		if _, err := io.Copy(w, bytes.NewReader(body)); err != nil {
-			rw.WriteError(http.StatusInternalServerError, err)
-			return
-		}
-		if err = w.Commit(ctx, size, desc.Digest, withSource(dist)); err != nil && !errdefs.IsAlreadyExists(err) {
-			rw.WriteError(http.StatusInternalServerError, err)
-			return
-		}
 	}
 
 	ref := dist.Reference()
@@ -407,10 +439,22 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		ref = fmt.Sprintf("%s/%s@%s", dist.Registry, dist.Name, desc.Digest)
 	}
 	image := images.Image{Name: ref, Target: desc}
-	if r.push.Upstream {
+	switch r.push.mode() {
+	case upstreamPushAsync:
 		// Recorded before the response so a restart before the upstream push
 		// completes leaves a marker that ResumeUpstreamPushes picks up.
 		image.Labels = map[string]string{pendingUpstreamPushLabel: desc.Digest.String()}
+	case upstreamPushSync:
+		release, err := r.lockManifestPush(ctx, ref)
+		if err != nil {
+			r.writeUpstreamError(rw, err)
+			return
+		}
+		defer release()
+		if err := r.pushDescriptor(ctx, req, ref, desc, cs, "manifest_put"); err != nil {
+			r.writeUpstreamError(rw, err)
+			return
+		}
 	}
 
 	imageService := client.ImageService()
@@ -419,7 +463,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		_, err = imageService.Update(ctx, image)
 	}
 	if err != nil {
-		rw.WriteError(http.StatusInternalServerError, err)
+		r.writePushError(rw, err)
 		return
 	}
 
@@ -430,7 +474,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 		r.log.Error(err, "failed to set image labels")
 		return
 	}
-	if r.push.Upstream {
+	if image.Labels[pendingUpstreamPushLabel] != "" {
 		pushHeaders := req.Header.Clone()
 		for k, v := range r.push.UpstreamHeaders {
 			pushHeaders.Set(k, v)
@@ -440,8 +484,8 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 }
 
 // Broadcast content for immediate discovery.
-func (r *Registry) advertise(dgst digest.Digest) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (r *Registry) advertise(ctx context.Context, dgst digest.Digest) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	err := r.router.Advertise(ctx, []string{dgst.String()}, true)
 	if err != nil {

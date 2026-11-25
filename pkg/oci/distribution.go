@@ -133,6 +133,7 @@ var _ httpx.ResponseError = &DistributionError{}
 type DistributionErrorCode string
 
 const (
+	ErrCodeUnknown             DistributionErrorCode = "UNKNOWN"
 	ErrCodeBlobUnknown         DistributionErrorCode = "BLOB_UNKNOWN"
 	ErrCodeBlobUploadInvalid   DistributionErrorCode = "BLOB_UPLOAD_INVALID"
 	ErrCodeBlobUploadUnknown   DistributionErrorCode = "BLOB_UPLOAD_UNKNOWN"

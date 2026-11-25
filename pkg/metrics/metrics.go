@@ -17,6 +17,8 @@ var (
 )
 
 var (
+	pushDurationBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 90, 110, 120, 180, 240, 300, 450, 590, 600}
+
 	MirrorRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "spegel_mirror_requests_total",
 		Help: "Total number of mirror requests.",
@@ -41,6 +43,16 @@ var (
 		Name: "spegel_advertised_keys",
 		Help: "Number of keys advertised to be available.",
 	}, []string{"registry"})
+	PushRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "spegel_push_request_duration_seconds",
+		Help:    "Time spent serving digest checks, blob commits and manifest puts.",
+		Buckets: pushDurationBuckets,
+	}, []string{"upstream_mode", "operation", "code"})
+	UpstreamWaitDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "spegel_push_upstream_wait_duration_seconds",
+		Help:    "Time spent waiting for upstream during a synchronous push request.",
+		Buckets: pushDurationBuckets,
+	}, []string{"upstream_mode", "operation", "result"})
 	UpstreamPushTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "spegel_upstream_push_total",
 		Help: "Total number of pushed images forwarded to the upstream registry, by final result after retries.",
@@ -67,6 +79,7 @@ func Register() {
 	DefaultRegisterer.MustRegister(AdvertisedImageTags)
 	DefaultRegisterer.MustRegister(AdvertisedImageDigests)
 	DefaultRegisterer.MustRegister(AdvertisedKeys)
+	DefaultRegisterer.MustRegister(PushRequestDuration, UpstreamWaitDuration)
 	DefaultRegisterer.MustRegister(UpstreamPushTotal)
 	DefaultRegisterer.MustRegister(UpstreamPushDurHistogram)
 	DefaultRegisterer.MustRegister(UpstreamPushInFlight)

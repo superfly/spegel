@@ -27,7 +27,7 @@ const pendingUpstreamPushLabel = "spegel.org/upstream-push-pending"
 // the process last stopped. Headers from the original push request are not
 // persisted, so resumed pushes carry only the configured upstream headers.
 func (r *Registry) ResumeUpstreamPushes(ctx context.Context) error {
-	if !r.push.Enabled || !r.push.Upstream {
+	if r.push.mode() == upstreamPushDisabled {
 		return nil
 	}
 	cdc, err := r.getContainerdClient()
@@ -44,9 +44,16 @@ func (r *Registry) ResumeUpstreamPushes(ctx context.Context) error {
 	}
 	cs := cdc.ContentStore()
 	for _, img := range imgs {
+		_, release := r.tryLockManifestPush(img.Name)
+		if release == nil {
+			continue
+		}
 		r.log.Info("Resuming upstream image push", "ref", img.Name, "digest", img.Target.Digest)
 		metrics.UpstreamPushResumedTotal.Inc()
-		go r.pushUpstream(img.Name, img.Target, cs, pushHeaders)
+		go func() {
+			defer release()
+			r.pushUpstream(img.Name, img.Target, cs, pushHeaders)
+		}()
 	}
 	return nil
 }
