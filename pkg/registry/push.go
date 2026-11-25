@@ -318,6 +318,39 @@ func (r *Registry) handleBlobUploadChunk(rw httpx.ResponseWriter, req *http.Requ
 	rw.WriteHeader(http.StatusAccepted)
 }
 
+const writerRetryWindow = 5 * time.Second
+
+var errWriterRetriesExhausted = errors.New("containerd content writer still unavailable")
+
+// acquirePushWriter retries with backoff when containerd returns Unavailable.
+// The first Unavailable starts the window for launching retries. Each open uses
+// the request context so it can finish rehashing a partial upload.
+func acquirePushWriter(ctx context.Context, cs content.Ingester, window time.Duration, opts ...content.WriterOpt) (content.Writer, error) { //nolint:ireturn // Preserve the containerd writer returned by the ingester.
+	w, err := cs.Writer(ctx, opts...)
+	if !errdefs.IsUnavailable(err) {
+		return w, err
+	}
+
+	deadline := time.Now().Add(window)
+	for delay := 16 * time.Millisecond; ; delay = min(2*delay, 500*time.Millisecond) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(min(delay, time.Until(deadline))):
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, errWriterRetriesExhausted
+		}
+		w, err = cs.Writer(ctx, opts...)
+		if !errdefs.IsUnavailable(err) {
+			return w, err
+		}
+	}
+}
+
 func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, cs content.Store) {
 	req, done := r.pushRequest(rw, req, "blob_commit")
 	defer done()
@@ -335,12 +368,12 @@ func (r *Registry) handleBlobUploadCommit(rw httpx.ResponseWriter, req *http.Req
 	}()
 
 	desc := ocispec.Descriptor{Digest: dist.Digest}
-	w, err := content.OpenWriter(ctx, cs, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
-	if err != nil && ctx.Err() != nil {
-		// A canceled wait did not acquire the writer. Keep the session lease
+	w, err := acquirePushWriter(ctx, cs, writerRetryWindow, content.WithRef(uploadRef(dist.Session)), content.WithDescriptor(desc))
+	if err != nil && (ctx.Err() != nil || errors.Is(err, errWriterRetriesExhausted)) {
+		// This request did not acquire the writer. Keep the session lease
 		// in case a concurrent request is still using it.
 		keepLease = true
-		r.writePushError(rw, ctx.Err())
+		r.writePushError(rw, err)
 		return
 	}
 	if errdefs.IsAlreadyExists(err) {
@@ -394,6 +427,18 @@ func (r *Registry) handleBlobUploadGet(rw httpx.ResponseWriter, req *http.Reques
 	rw.WriteHeader(http.StatusNoContent)
 }
 
+func writeManifestBlob(ctx context.Context, cs content.Store, dist oci.DistributionPath, body []byte, desc ocispec.Descriptor) error {
+	w, err := acquirePushWriter(ctx, cs, writerRetryWindow, content.WithRef(dist.Reference()), content.WithDescriptor(desc))
+	if errdefs.IsAlreadyExists(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	return content.Copy(ctx, w, bytes.NewReader(body), desc.Size, desc.Digest, withSource(dist))
+}
+
 func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request, dist oci.DistributionPath, client *client.Client) {
 	req, done := r.pushRequest(rw, req, "manifest_put")
 	defer done()
@@ -429,7 +474,7 @@ func (r *Registry) handleManifestPut(rw httpx.ResponseWriter, req *http.Request,
 	}
 
 	cs := client.ContentStore()
-	if err := content.WriteBlob(ctx, cs, dist.Reference(), bytes.NewReader(body), desc, withSource(dist)); err != nil {
+	if err := writeManifestBlob(ctx, cs, dist, body, desc); err != nil {
 		r.writePushError(rw, err)
 		return
 	}

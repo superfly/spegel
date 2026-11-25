@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containerd/containerd/api/services/content/v1"
+	contentapi "github.com/containerd/containerd/api/services/content/v1"
 	"github.com/containerd/containerd/api/services/images/v1"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/containerd/v2/plugins/services/content/contentserver"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
@@ -188,6 +190,45 @@ func (s syncTestImageStore) Create(ctx context.Context, req *images.CreateImageR
 	return &images.CreateImageResponse{Image: req.Image}, nil
 }
 
+type slowIngester struct {
+	content.Ingester
+	unavailableOnce bool
+}
+
+func (s *slowIngester) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) { //nolint:ireturn // Required by content.Ingester.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(200 * time.Millisecond):
+	}
+	if s.unavailableOnce {
+		s.unavailableOnce = false
+		return nil, errdefs.ErrUnavailable
+	}
+	return s.Ingester.Writer(ctx, opts...)
+}
+
+func TestSlowWriterOpen(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		unavailableOnce bool
+	}{
+		{"first open succeeds", false},
+		{"slow first open is unavailable and slow retry succeeds", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cs, err := local.NewStore(t.TempDir())
+			require.NoError(t, err)
+			store := &slowIngester{Ingester: cs, unavailableOnce: tc.unavailableOnce}
+			w, err := acquirePushWriter(t.Context(), store, 100*time.Millisecond, content.WithRef("slow-upload"))
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+		})
+	}
+}
+
 func TestSyncPushCommits(t *testing.T) {
 	t.Parallel()
 
@@ -200,7 +241,7 @@ func TestSyncPushCommits(t *testing.T) {
 	unblockCreate := make(chan struct{})
 	defer close(unblockCreate)
 	imageStore := syncTestImageStore{created: make(chan string, 2), blockCreate: unblockCreate}
-	content.RegisterContentServer(server, contentserver.New(cs))
+	contentapi.RegisterContentServer(server, contentserver.New(cs))
 	images.RegisterImagesServer(server, imageStore)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
@@ -291,6 +332,16 @@ func TestSyncPushCommits(t *testing.T) {
 	query := commitURL.Query()
 	query.Set("digest", digest.FromBytes(other).String())
 	commitURL.RawQuery = query.Encode()
+	// The upload-start RPC can return before containerd releases its writer.
+	lockCtx, cancelLock := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelLock()
+	lock, err := content.OpenWriter(lockCtx, cs, content.WithRef(uploadRef(resp.Header().Get("Docker-Upload-UUID"))))
+	require.NoError(t, err)
+	busy := send(http.MethodPut, commitURL.String(), "", other)
+	require.NoError(t, lock.Close())
+	require.Equal(t, http.StatusServiceUnavailable, busy.Code, busy.Body.String())
+	require.Equal(t, int32(1), blobUploads.Load())
+
 	failCommit.Store(true)
 	resp = send(http.MethodPut, commitURL.String(), "", other)
 	require.Equal(t, http.StatusBadGateway, resp.Code, resp.Body.String())

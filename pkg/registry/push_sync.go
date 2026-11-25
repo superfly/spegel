@@ -90,6 +90,10 @@ func (r *Registry) syncUpstreamHeaders(req *http.Request) http.Header {
 }
 
 func (r *Registry) writePushError(rw httpx.ResponseWriter, err error) {
+	if errors.Is(err, errWriterRetriesExhausted) {
+		rw.WriteError(http.StatusServiceUnavailable, oci.NewDistributionError(oci.ErrCodeUnknown, err.Error(), nil))
+		return
+	}
 	if r.push.mode() == upstreamPushSync && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded)) {
 		r.writeUpstreamError(rw, err)
 		return
