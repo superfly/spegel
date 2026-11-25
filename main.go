@@ -62,7 +62,7 @@ type RegistryCmd struct {
 	ResolveLatestTag      bool          `arg:"--resolve-latest-tag,env:RESOLVE_LATEST_TAG" default:"true" help:"When true latest tags will be resolved to digests."`
 	DisableLatestTagCache bool          `arg:"--disable-latest-tag-cache,env:DISABLE_LATEST_TAG_CACHE" default:"false" help:"When true the latest tag will not be served from local cache."`
 	DebugWebEnabled       bool          `arg:"--debug-web-enabled,env:DEBUG_WEB_ENABLED" default:"false" help:"When true enables debug web page."`
-	Broadcast             bool          `arg:"--broadcast,env:BROADCAST" default:"false" help:"Broadcast content advertisements across the cluster."`
+	Broadcast             bool          `arg:"--broadcast,env:BROADCAST" default:"false" help:"Broadcast content advertisements from events and startup and periodic scans."`
 }
 
 type CleanupCmd struct {

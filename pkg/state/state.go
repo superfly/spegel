@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -19,6 +20,14 @@ func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resol
 	if err != nil {
 		return err
 	}
+	if brdcst {
+		// State tracking and the DHT start concurrently. Give bootstrap time
+		// to find peers before attempting to publish the startup inventory.
+		err := waitForRouter(ctx, router)
+		if err != nil && ctx.Err() == nil {
+			log.Error(err, "DHT did not become ready before the startup scan")
+		}
+	}
 	immediateCh := make(chan time.Time, 1)
 	immediateCh <- time.Now()
 	close(immediateCh)
@@ -31,7 +40,7 @@ func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resol
 			return nil
 		case <-tickerCh:
 			log.Info("running state update")
-			err := tick(ctx, ociStore, router, resolveLatestTag)
+			err := tick(ctx, ociStore, router, resolveLatestTag, brdcst)
 			if err != nil {
 				log.Error(err, "received errors when updating all images")
 				continue
@@ -50,11 +59,49 @@ func Track(ctx context.Context, ociStore oci.Store, router routing.Router, resol
 	}
 }
 
-func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatest bool) error {
+func waitForRouter(ctx context.Context, router routing.Router) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		ready, err := router.Ready(ctx)
+		if ready || err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolveLatest, brdcst bool) error {
 	advertisedImages := map[string]float64{}
 	advertisedImageDigests := map[string]float64{}
 	advertisedImageTags := map[string]float64{}
 	advertisedKeys := map[string]float64{}
+	var published, failed int
+	var firstErr error
+	advertise := func(key string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := router.Advertise(ctx, []string{key}, brdcst)
+		if !brdcst {
+			return err
+		}
+		if err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", key, err)
+			}
+		} else {
+			published++
+		}
+		return nil
+	}
 
 	imgs, err := ociStore.ListImages(ctx)
 	if err != nil {
@@ -70,7 +117,7 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 		if !ok {
 			continue
 		}
-		err := router.Advertise(ctx, []string{tagName}, false)
+		err := advertise(tagName)
 		if err != nil {
 			return err
 		}
@@ -83,7 +130,7 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 		return err
 	}
 	for _, content := range contents {
-		err := router.Advertise(ctx, []string{content.Digest.String()}, false)
+		err := advertise(content.Digest.String())
 		if err != nil {
 			return err
 		}
@@ -103,6 +150,12 @@ func tick(ctx context.Context, ociStore oci.Store, router routing.Router, resolv
 	}
 	for k, v := range advertisedKeys {
 		metrics.AdvertisedKeys.WithLabelValues(k).Set(v)
+	}
+	if brdcst {
+		logr.FromContextOrDiscard(ctx).Info("finished publishing scanned keys", "published", published, "failed", failed)
+	}
+	if firstErr != nil {
+		return fmt.Errorf("failed to publish %d scanned keys (first failure: %w)", failed, firstErr)
 	}
 	return nil
 }

@@ -59,6 +59,7 @@ func TestTrack(t *testing.T) {
 	tests := []struct {
 		name             string
 		resolveLatestTag bool
+		broadcast        bool
 	}{
 		{
 			name:             "resolve latest",
@@ -67,6 +68,11 @@ func TestTrack(t *testing.T) {
 		{
 			name:             "do not resolve latest",
 			resolveLatestTag: false,
+		},
+		{
+			name:             "publish existing content at startup",
+			resolveLatestTag: true,
+			broadcast:        true,
 		},
 	}
 	for _, tt := range tests {
@@ -77,10 +83,13 @@ func TestTrack(t *testing.T) {
 			ctx := logr.NewContext(t.Context(), log)
 			ctx, cancel := context.WithCancel(ctx)
 
-			router := routing.NewMemoryRouter(map[string][]netip.AddrPort{}, netip.MustParseAddrPort("127.0.0.1:5000"))
+			router := routing.NewMemoryRouter(map[string][]netip.AddrPort{
+				"bootstrap": {netip.MustParseAddrPort("127.0.0.2:5000")},
+			}, netip.MustParseAddrPort("127.0.0.1:5000"))
+			recorder := &broadcastRecorder{Router: router}
 			g, gCtx := errgroup.WithContext(ctx)
 			g.Go(func() error {
-				return Track(gCtx, ociStore, router, tt.resolveLatestTag, false)
+				return Track(gCtx, ociStore, recorder, tt.resolveLatestTag, tt.broadcast)
 			})
 			time.Sleep(100 * time.Millisecond)
 
@@ -104,6 +113,23 @@ func TestTrack(t *testing.T) {
 			cancel()
 			err := g.Wait()
 			require.NoError(t, err)
+			if tt.broadcast {
+				require.Equal(t, 4, recorder.broadcasts)
+			} else {
+				require.Zero(t, recorder.broadcasts)
+			}
 		})
 	}
+}
+
+type broadcastRecorder struct {
+	routing.Router
+	broadcasts int
+}
+
+func (r *broadcastRecorder) Advertise(ctx context.Context, keys []string, broadcast bool) error {
+	if broadcast {
+		r.broadcasts += len(keys)
+	}
+	return r.Router.Advertise(ctx, keys, broadcast)
 }
