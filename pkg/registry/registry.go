@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -113,12 +114,15 @@ type Registry struct {
 	log                   logr.Logger
 	bufferPool            *sync.Pool
 	ociClient             *oci.Client
+	upstreamClient        *http.Client
+	activeManifestPushes  map[string]chan struct{}
 	username              string
 	password              string
 	addr                  string
 	push                  PushConfig
 	resolveTimeout        time.Duration
 	resolveRetries        int
+	manifestPushMu        sync.Mutex
 	resolveLatestTag      bool
 	disableLatestTagCache bool
 }
@@ -134,6 +138,16 @@ func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOpti
 	err := cfg.Apply(opts...)
 	if err != nil {
 		return nil, err
+	}
+
+	if mode := upstreamPushMode(cfg.Push.UpstreamMode); mode != "" && mode != upstreamPushAsync && mode != upstreamPushSync {
+		return nil, fmt.Errorf("invalid upstream push mode %q", cfg.Push.UpstreamMode)
+	}
+	if cfg.Push.SyncTimeout < 0 {
+		return nil, errors.New("upstream push sync timeout must be positive")
+	}
+	if cfg.Push.SyncTimeout == 0 {
+		cfg.Push.SyncTimeout = 590 * time.Second
 	}
 
 	httpClient := &http.Client{}
@@ -159,6 +173,8 @@ func NewRegistry(ociStore oci.Store, router routing.Router, opts ...RegistryOpti
 		ociStore:              ociStore,
 		router:                router,
 		ociClient:             ociClient,
+		upstreamClient:        httpClient,
+		activeManifestPushes:  make(map[string]chan struct{}),
 		log:                   cfg.Log,
 		resolveRetries:        cfg.ResolveRetries,
 		resolveLatestTag:      cfg.ResolveLatestTag,
@@ -194,6 +210,27 @@ func (r *Registry) Server(addr string) (*http.Server, error) {
 	}
 	r.addr = addr
 	return srv, nil
+}
+
+// Serve starts the registry and recovers outstanding asynchronous pushes.
+// Sync mode registers them before accepting a new write to the same image.
+func (r *Registry) Serve(ctx context.Context, srv *http.Server) error {
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+
+	resume := func() {
+		if err := r.ResumeUpstreamPushes(ctx); err != nil {
+			r.log.Error(err, "failed to resume pending upstream pushes")
+		}
+	}
+	if r.push.mode() == upstreamPushSync {
+		resume()
+	} else {
+		go resume()
+	}
+	return srv.Serve(listener)
 }
 
 func (r *Registry) readyHandler(rw httpx.ResponseWriter, req *http.Request) {
@@ -242,6 +279,19 @@ func (r *Registry) registryHandler(rw httpx.ResponseWriter, req *http.Request) {
 	if err != nil {
 		rw.WriteError(http.StatusNotFound, fmt.Errorf("could not parse path according to OCI distribution spec: %w", err))
 		return
+	}
+
+	if req.Method == http.MethodHead && dist.Digest != "" && (dist.Kind == oci.DistributionKindBlob || dist.Kind == oci.DistributionKindManifest) && req.Header.Get(HeaderSpegelPreferUpstream) == "true" && isLocalRequest(req) {
+		operation := "blob_head"
+		if dist.Kind == oci.DistributionKindManifest {
+			operation = "manifest_head"
+		}
+		req, done := r.pushRequest(rw, req, operation)
+		defer done()
+		if r.push.mode() == upstreamPushSync {
+			r.handleUpstreamHead(rw, req, dist, operation)
+			return
+		}
 	}
 
 	// Request with mirror header are proxied.

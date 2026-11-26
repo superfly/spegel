@@ -67,6 +67,8 @@ linters:
           alias: bolt
         - pkg: k8s.io/cri-api/pkg/apis/runtime/v1
           alias: runtimeapi
+        - pkg: github.com/containerd/containerd/api/services/content/v1
+          alias: contentapi
         - pkg: github.com/containerd/containerd/api/events
           alias: eventtypes
         - pkg: github.com/opencontainers/go-digest
